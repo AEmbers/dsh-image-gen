@@ -1,9 +1,22 @@
 import { useEffect, useMemo, useRef, useState, type FC } from 'react'
-import { AlertTriangle, Check, Clipboard, ExternalLink, ImageIcon, LoaderCircle, Maximize2, Search, Sparkles, Star, Trash2, X } from 'lucide-react'
+import { AlertTriangle, Check, Clipboard, ExternalLink, ImageIcon, ImagePlus, LoaderCircle, Maximize2, Search, Shuffle, Sparkles, Star, Trash2, X } from 'lucide-react'
 import { INSPIRATION_ROUTE } from '../shared.js'
 import type { InspirationCase, InspirationCatalog, InspirationSource } from '../inspiration.js'
 import { clearInspirationImageCache, evictInspirationImage, fetchInspirationImage } from './inspiration-image-cache.js'
 import { loadCachedInspirationCatalog, saveCachedInspirationCatalog } from './inspiration-catalog-cache.js'
+import {
+  BAOYU_COMPOSER_SOURCE_ID,
+  BAOYU_DEFAULT_SELECTION,
+  BAOYU_LABELS_ZH,
+  BAOYU_MOODS,
+  BAOYU_PALETTES,
+  BAOYU_RENDERINGS,
+  BAOYU_TEXT_LEVELS,
+  BAOYU_TYPES,
+  composeBaoyuPrompt,
+  randomBaoyuSelection,
+  type BaoyuSelection,
+} from '../baoyu-compose.js'
 import type { LocaleService } from './gallery-view.js'
 
 type Language = 'zh' | 'en'
@@ -96,31 +109,45 @@ const COPY = {
     kicker: 'Prompt inspiration', title: '灵感素材', subtitle: '从公开案例中找构图、质感和文字处理，再带回工作台继续调整。',
     refresh: '检查更新', refreshing: '正在更新…', clearCache: '清理缓存', clearingCache: '正在清理…', cacheCleared: '已清空本地图片缓存', cacheClearFailed: '清理缓存失败', clearCacheRestart: '后端未就绪，请重启 DSH 后生效',
     clearModalTitle: '清理本地图片缓存？', clearModalDesc: '将删除本地保存的灵感素材图片以释放磁盘空间。案例列表、Prompt 和您的收藏夹不会受到任何影响，后续浏览时会自动重新拉取。', cancel: '取消', confirmClear: '确认清理',
-    allCategories: '全部分类', allStyles: '全部风格', allScenes: '全部场景',
+    allCategories: '全部分类', allStyles: '全部风格', allScenes: '全部场景', categoryNav: '分类导航',
     search: '搜索案例、Prompt、风格…', results: '找到 {count} 个案例', noResults: '没有匹配的素材，换个关键词或筛选条件试试。',
     selectHint: '选择一张素材，查看完整 Prompt 并带回工作台。', prompt: '完整 Prompt', copy: '复制 Prompt', copied: '已复制', use: '使用这个 Prompt', source: '查看原来源',
+    useReference: '提示词 + 参考图', referenceLoading: '获取参考图中…', referenceFailed: '参考图获取失败，请重试',
     loading: '正在读取素材库…', loadFailed: '素材库读取失败，请稍后重试。', copyFailed: '复制失败', retry: '重新加载', imageFailed: '图片暂时无法读取', featured: '精选', updated: '素材已更新（{count} 条）', updateFailed: '更新失败，仍在使用当前内置素材。',
     allLoaded: '已展示全部 {count} 个案例', onlyFavorites: '仅看收藏', noFavorites: '暂无收藏的灵感案例，浏览时点击星标即可收藏。',
     favorite: '收藏', favorited: '已收藏', zoomHint: '点击放大查看', close: '关闭',
+    composeTab: '宝玉维度组合',
+    composeHint: '五个维度自由拼接封面 Prompt，数据源自宝玉封图 skill（JimLiu/baoyu-skills，MIT）。',
+    composeType: '类型', composePalette: '色板', composeRendering: '渲染', composeText: '文字', composeMood: '情绪',
+    composeTitleLabel: '标题文字', composeTitlePlaceholder: '输入封面标题（文字层级含标题时必填）', composeTitleRequired: '该文字层级需要先填写标题。',
+    composeRandomize: '随机组合', composeUse: '用此 Prompt 去生成', composeCombos: '共 {count} 种组合', composePreview: '拼接结果预览',
   },
   en: {
     kicker: 'Prompt inspiration', title: 'Inspiration', subtitle: 'Explore public examples, then bring a prompt back to Studio to make it your own.',
     refresh: 'Check updates', refreshing: 'Updating…', clearCache: 'Clear cache', clearingCache: 'Clearing…', cacheCleared: 'Local image cache cleared', cacheClearFailed: 'Failed to clear cache', clearCacheRestart: 'Backend not ready, please restart DSH',
     clearModalTitle: 'Clear local image cache?', clearModalDesc: 'This will delete locally cached inspiration images to free up disk space. The catalog, prompts, and your bookmarks will remain intact. Images will be re-fetched on demand.', cancel: 'Cancel', confirmClear: 'Clear Cache',
-    allCategories: 'All categories', allStyles: 'All styles', allScenes: 'All scenes',
+    allCategories: 'All categories', allStyles: 'All styles', allScenes: 'All scenes', categoryNav: 'Categories',
     search: 'Search examples, prompts, styles…', results: '{count} examples', noResults: 'No matching examples. Try another keyword or filter.',
     selectHint: 'Choose an example to read its full prompt and use it in Studio.', prompt: 'Full prompt', copy: 'Copy prompt', copied: 'Copied', use: 'Use this prompt', source: 'View source',
+    useReference: 'Prompt + reference', referenceLoading: 'Fetching image…', referenceFailed: 'Failed to load the reference image',
     loading: 'Loading inspiration…', loadFailed: 'Could not load the inspiration library.', copyFailed: 'Failed to copy', retry: 'Retry', imageFailed: 'Image is temporarily unavailable', featured: 'Featured', updated: 'Updated ({count} examples)', updateFailed: 'Update failed. The current bundled library is still available.',
     allLoaded: 'All {count} examples displayed', onlyFavorites: 'Favorites only', noFavorites: 'No favorited examples yet. Click the star icon on any card to save.',
     favorite: 'Favorite', favorited: 'Favorited', zoomHint: 'Click to zoom in', close: 'Close',
+    composeTab: 'Baoyu Composer',
+    composeHint: 'Stitch a cover prompt from five dimensions, based on the baoyu cover-image skill (JimLiu/baoyu-skills, MIT).',
+    composeType: 'Type', composePalette: 'Palette', composeRendering: 'Rendering', composeText: 'Text', composeMood: 'Mood',
+    composeTitleLabel: 'Title text', composeTitlePlaceholder: 'Cover title (required when the text level includes a title)', composeTitleRequired: 'This text level needs a title first.',
+    composeRandomize: 'Randomize', composeUse: 'Generate with this prompt', composeCombos: '{count} combinations', composePreview: 'Composed prompt preview',
   },
 } as const
 
 type CopyKey = keyof typeof COPY.zh
 
-export const InspirationView: FC<{ locale?: LocaleService | undefined; onUsePrompt(prompt: string): void }> = ({ locale, onUsePrompt }) => {
+export const InspirationView: FC<{ locale?: LocaleService | undefined; onUsePrompt(prompt: string): void; onUseReference?: ((file: File, prompt: string) => void) | undefined }> = ({ locale, onUsePrompt, onUseReference }) => {
   const [language, setLanguage] = useState<Language>(() => locale?.getSnapshot?.().active?.startsWith('en') ? 'en' : 'zh')
   const [catalog, setCatalog] = useState<InspirationCatalog | null>(null)
+  const [activeSourceId, setActiveSourceId] = useState('')
+  const [baoyuSelection, setBaoyuSelection] = useState<BaoyuSelection>(BAOYU_DEFAULT_SELECTION)
   const [catalogError, setCatalogError] = useState(false)
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState('')
@@ -134,10 +161,14 @@ export const InspirationView: FC<{ locale?: LocaleService | undefined; onUseProm
   const [copied, setCopied] = useState(false)
   const [favorites, setFavorites] = useState<Set<string>>(() => loadInspirationFavorites())
   const [onlyFavorites, setOnlyFavorites] = useState(false)
-  const [lightboxCase, setLightboxCase] = useState<{ sourceId: string; caseId: string; title: string; alt: string } | null>(null)
+  const [lightboxCase, setLightboxCase] = useState<{ sourceId: string; caseId: string; revision: string; title: string; alt: string } | null>(null)
   const [toast, setToast] = useState<{ text: string; isError?: boolean } | null>(null)
+  const [referenceBusy, setReferenceBusy] = useState(false)
+  const [pendingJump, setPendingJump] = useState('')
+  const [activeCategory, setActiveCategory] = useState('')
   const toastTimerRef = useRef<number | null>(null)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
+  const listRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!locale?.subscribe) return
@@ -213,7 +244,36 @@ export const InspirationView: FC<{ locale?: LocaleService | undefined; onUseProm
     return () => { mounted = false }
   }, [])
 
-  const source = catalog?.sources[0] ?? null
+  const source = catalog?.sources.find(candidate => candidate.id === activeSourceId) ?? catalog?.sources[0] ?? null
+  const composerActive = activeSourceId === BAOYU_COMPOSER_SOURCE_ID
+
+  /** Switch the active library; each source owns its own category/style/scene vocabularies. */
+  const switchSource = (id: string) => {
+    if (id === activeSourceId) return
+    setActiveSourceId(id)
+    setCategory('')
+    setStyle('')
+    setScene('')
+    setOnlyFavorites(false)
+    setSelected(null)
+    setPendingJump('')
+    setActiveCategory('')
+  }
+
+  const useSelectedReference = async () => {
+    if (selected === null || source === null || onUseReference === undefined) return
+    setReferenceBusy(true)
+    try {
+      const blob = await fetchInspirationImage(source.id, selected.id, source.imageRevision ?? source.version)
+      const ext = blob.type === 'image/jpeg' ? 'jpg' : blob.type.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'png'
+      onUseReference(new File([blob], `inspiration-${selected.id}.${ext}`, { type: blob.type.startsWith('image/') ? blob.type : 'image/webp' }), selected.prompt)
+    } catch {
+      showToast(t('referenceFailed'), true)
+    } finally {
+      setReferenceBusy(false)
+    }
+  }
+
   const matchingCases = useMemo(() => {
     if (source === null) return []
     const query = search.trim().toLowerCase()
@@ -232,6 +292,66 @@ export const InspirationView: FC<{ locale?: LocaleService | undefined; onUseProm
 
   useEffect(() => setVisibleLimit(60), [search, category, style, scene, onlyFavorites])
   const visibleCases = matchingCases.slice(0, visibleLimit)
+
+  // 每个分类在当前筛选下的命中数：驱动导航芯片的计数与可用性
+  const categoryCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const item of matchingCases) counts.set(item.category, (counts.get(item.category) ?? 0) + 1)
+    return counts
+  }, [matchingCases])
+
+  // 可见案例按分类分组（沿用素材库的分类顺序），渲染成带粘性标题的“样例区”
+  const visibleGroups = useMemo(() => {
+    if (source === null) return []
+    const byCategory = new Map<string, InspirationCase[]>()
+    for (const item of visibleCases) {
+      const bucket = byCategory.get(item.category)
+      if (bucket !== undefined) bucket.push(item)
+      else byCategory.set(item.category, [item])
+    }
+    return source.categories.flatMap(name => {
+      const items = byCategory.get(name)
+      return items !== undefined ? [{ name, items }] : []
+    })
+  }, [source, visibleCases])
+  const visibleGroupSignature = visibleGroups.map(group => group.name).join('\u0000')
+
+  // 点击导航：清掉单分类下拉（保证目标区可见），等待筛选与虚拟列表补齐后平滑滚动
+  const jumpToCategory = (name: string) => {
+    if (category !== '') setCategory('')
+    setPendingJump(name)
+  }
+
+  useEffect(() => {
+    if (pendingJump === '') return
+    const index = matchingCases.findIndex(item => item.category === pendingJump)
+    if (index < 0) return
+    if (index >= visibleLimit) {
+      setVisibleLimit(index + 60)
+      return
+    }
+    const raf = requestAnimationFrame(() => {
+      document.getElementById(`dsh-ig-cat-${encodeURIComponent(pendingJump)}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      setPendingJump('')
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [pendingJump, matchingCases, visibleLimit])
+
+  // 滚动监听：当前停留在视口上部的样例区即为导航高亮项
+  useEffect(() => {
+    const root = listRef.current
+    if (root === null) return
+    const headers = Array.from(root.querySelectorAll<HTMLElement>('.dsh-ig-inspiration-group-head'))
+    if (headers.length === 0) return
+    const categoryByTarget = new Map<Element, string>()
+    for (const header of headers) categoryByTarget.set(header, header.dataset.category ?? '')
+    const observer = new IntersectionObserver(entries => {
+      const visible = entries.find(entry => entry.isIntersecting)
+      if (visible !== undefined) setActiveCategory(categoryByTarget.get(visible.target) ?? '')
+    }, { rootMargin: '0px 0px -75% 0px' })
+    for (const header of headers) observer.observe(header)
+    return () => observer.disconnect()
+  }, [visibleGroupSignature])
 
   // 现代感应式无限滚动：滑近底部时自动追加批次
   useEffect(() => {
@@ -344,6 +464,40 @@ export const InspirationView: FC<{ locale?: LocaleService | undefined; onUseProm
     ) : source === null ? (
       <div className="dsh-ig-inspiration-empty"><LoaderCircle className="dsh-ig-spin" size={23} /><span>{t('loading')}</span></div>
     ) : <>
+      {catalog !== null ? (
+        <div className="dsh-ig-inspiration-sources" role="tablist">
+          {catalog.sources.map(item => (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={!composerActive && item.id === source?.id}
+              className={`dsh-ig-inspiration-source-chip ${!composerActive && item.id === source?.id ? 'is-active' : ''}`}
+              onClick={() => switchSource(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={composerActive}
+            className={`dsh-ig-inspiration-source-chip ${composerActive ? 'is-active' : ''}`}
+            onClick={() => switchSource(BAOYU_COMPOSER_SOURCE_ID)}
+          >
+            <Sparkles size={11} />
+            {t('composeTab')}
+          </button>
+        </div>
+      ) : null}
+      {composerActive ? (
+        <BaoyuComposerPanel
+          language={language}
+          selection={baoyuSelection}
+          onChange={setBaoyuSelection}
+          onUsePrompt={onUsePrompt}
+        />
+      ) : <>
       <div className="dsh-ig-inspiration-toolbar">
         <label className="dsh-ig-inspiration-search"><Search size={15} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder={t('search')} /></label>
         <button
@@ -368,6 +522,36 @@ export const InspirationView: FC<{ locale?: LocaleService | undefined; onUseProm
           {source.scenes.map(item => <option key={item} value={item}>{translateTag(item, language)}</option>)}
         </select>
       </div>
+      <nav className="dsh-ig-inspiration-catnav" aria-label={t('categoryNav')}>
+        <button
+          type="button"
+          className={`dsh-ig-inspiration-catnav-chip ${category === '' && activeCategory === '' ? 'is-active' : ''}`}
+          onClick={() => {
+            if (category !== '') setCategory('')
+            listRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+          }}
+        >
+          <span>{t('allCategories')}</span>
+          <em>{matchingCases.length}</em>
+        </button>
+        {source.categories.map(name => {
+          const count = categoryCounts.get(name) ?? 0
+          const isActive = category === name || (category === '' && activeCategory === name)
+          return (
+            <button
+              key={name}
+              type="button"
+              disabled={count === 0}
+              aria-current={isActive || undefined}
+              className={`dsh-ig-inspiration-catnav-chip ${isActive ? 'is-active' : ''}`}
+              onClick={() => jumpToCategory(name)}
+            >
+              <span>{translateTag(name, language)}</span>
+              <em>{count}</em>
+            </button>
+          )
+        })}
+      </nav>
       <div className="dsh-ig-inspiration-layout">
         <div>
           <div className="dsh-ig-inspiration-summary">
@@ -378,20 +562,35 @@ export const InspirationView: FC<{ locale?: LocaleService | undefined; onUseProm
             <div className="dsh-ig-inspiration-empty">{onlyFavorites ? t('noFavorites') : t('noResults')}</div>
           ) : (
             <>
-              <div className="dsh-ig-inspiration-grid">
-                {visibleCases.map(item => (
-                  <InspirationCard
-                    key={item.id}
-                    item={item}
-                    sourceId={source.id}
-                    selected={selected?.id === item.id}
-                    isFavorited={favorites.has(item.id)}
-                    language={language}
-                    featuredLabel={t('featured')}
-                    retryLabel={t('retry')}
-                    onSelect={() => { setSelected(item); setCopied(false) }}
-                    onToggleFavorite={() => toggleFavorite(item.id)}
-                  />
+              <div ref={listRef} className="dsh-ig-inspiration-list">
+                {visibleGroups.map(group => (
+                  <section key={group.name} className="dsh-ig-inspiration-group">
+                    <h3
+                      id={`dsh-ig-cat-${encodeURIComponent(group.name)}`}
+                      data-category={group.name}
+                      className="dsh-ig-inspiration-group-head"
+                    >
+                      <span>{translateTag(group.name, language)}</span>
+                      <em>{categoryCounts.get(group.name) ?? group.items.length}</em>
+                    </h3>
+                    <div className="dsh-ig-inspiration-grid">
+                      {group.items.map(item => (
+                        <InspirationCard
+                          key={item.id}
+                          item={item}
+                          sourceId={source.id}
+                          sourceRevision={source.imageRevision ?? source.version}
+                          selected={selected?.id === item.id}
+                          isFavorited={favorites.has(item.id)}
+                          language={language}
+                          featuredLabel={t('featured')}
+                          retryLabel={t('retry')}
+                          onSelect={() => { setSelected(item); setCopied(false) }}
+                          onToggleFavorite={() => toggleFavorite(item.id)}
+                        />
+                      ))}
+                    </div>
+                  </section>
                 ))}
               </div>
               {visibleCases.length < matchingCases.length ? (
@@ -409,10 +608,10 @@ export const InspirationView: FC<{ locale?: LocaleService | undefined; onUseProm
             <>
               <div
                 className="dsh-ig-inspiration-inspector-image"
-                onClick={() => setLightboxCase({ sourceId: source.id, caseId: selected.id, title: selected.title, alt: selected.imageAlt })}
+                onClick={() => setLightboxCase({ sourceId: source.id, caseId: selected.id, revision: source.imageRevision ?? source.version, title: selected.title, alt: selected.imageAlt })}
                 title={t('zoomHint')}
               >
-                <InspirationImage sourceId={source.id} caseId={selected.id} alt={selected.imageAlt} retryLabel={t('retry')} />
+                <InspirationImage sourceId={source.id} caseId={selected.id} revision={source.imageRevision ?? source.version} alt={selected.imageAlt} retryLabel={t('retry')} />
                 <span className="dsh-ig-inspiration-inspector-zoom-hint">
                   <Maximize2 size={11} />
                   {t('zoomHint')}
@@ -441,12 +640,18 @@ export const InspirationView: FC<{ locale?: LocaleService | undefined; onUseProm
                   <button type="button" onClick={() => void copyPrompt()}>{copied ? <Check size={14} /> : <Clipboard size={14} />}{copied ? t('copied') : t('copy')}</button>
                   {selected.sourceUrl ?? selected.githubUrl ? <a className="dsh-ig-inspiration-source-link" href={selected.sourceUrl ?? selected.githubUrl} target="_blank" rel="noreferrer"><ExternalLink size={14} />{t('source')}</a> : <span /> }
                   <button type="button" className="dsh-ig-inspiration-use" onClick={() => onUsePrompt(selected.prompt)}><Sparkles size={14} />{t('use')}</button>
+                  {onUseReference !== undefined ? (
+                    <button type="button" className="dsh-ig-inspiration-use is-secondary" disabled={referenceBusy} onClick={() => { void useSelectedReference() }}>
+                      <ImagePlus size={14} />{referenceBusy ? t('referenceLoading') : t('useReference')}
+                    </button>
+                  ) : null}
                 </div>
               </div>
             </>
           )}
         </aside>
       </div>
+      </>}
     </>}
 
     {/* 大图弹窗全屏查看 (Lightbox Modal) */}
@@ -457,7 +662,7 @@ export const InspirationView: FC<{ locale?: LocaleService | undefined; onUseProm
             <X size={18} />
           </button>
           <div className="dsh-ig-inspiration-lightbox-img-wrap">
-            <InspirationImage sourceId={lightboxCase.sourceId} caseId={lightboxCase.caseId} alt={lightboxCase.alt} retryLabel={t('retry')} />
+            <InspirationImage sourceId={lightboxCase.sourceId} caseId={lightboxCase.caseId} revision={lightboxCase.revision} alt={lightboxCase.alt} retryLabel={t('retry')} />
           </div>
           <div className="dsh-ig-inspiration-lightbox-caption">{lightboxCase.title}</div>
         </div>
@@ -503,9 +708,133 @@ export const InspirationView: FC<{ locale?: LocaleService | undefined; onUseProm
   </section>
 }
 
+const BaoyuComposerPanel: FC<{
+  language: Language
+  selection: BaoyuSelection
+  onChange(next: BaoyuSelection): void
+  onUsePrompt(prompt: string): void
+}> = ({ language, selection, onChange, onUsePrompt }) => {
+  const [copied, setCopied] = useState(false)
+  const [copyFailed, setCopyFailed] = useState(false)
+  const tr = (key: CopyKey, params?: Record<string, string>): string => {
+    let text: string = COPY[language][key] ?? COPY.zh[key]
+    if (params) {
+      for (const [k, v] of Object.entries(params)) {
+        text = text.replace(`{${k}}`, v)
+      }
+    }
+    return text
+  }
+  const label = (id: string): string => (language === 'zh' ? BAOYU_LABELS_ZH[id] ?? id : id)
+  const needsTitle = selection.text !== 'none'
+  const titleReady = !needsTitle || selection.title.trim() !== ''
+  let prompt = ''
+  if (titleReady) {
+    try {
+      prompt = composeBaoyuPrompt(selection)
+    } catch {
+      prompt = ''
+    }
+  }
+  const combos = BAOYU_TYPES.length * BAOYU_PALETTES.length * BAOYU_RENDERINGS.length * BAOYU_TEXT_LEVELS.length * BAOYU_MOODS.length
+
+  const dimension = (name: string, key: 'type' | 'palette' | 'rendering' | 'text' | 'mood', options: { id: string }[]) => (
+    <div className="dsh-ig-baoyu-dim" key={name}>
+      <div className="dsh-ig-baoyu-dim-head">{name}</div>
+      <div className="dsh-ig-baoyu-chips">
+        {options.map(option => {
+          const palette = key === 'palette' ? BAOYU_PALETTES.find(item => item.id === option.id) : undefined
+          return (
+            <button
+              key={option.id}
+              type="button"
+              className={`dsh-ig-baoyu-chip ${selection[key] === option.id ? 'is-active' : ''}`}
+              onClick={() => {
+                onChange({ ...selection, [key]: option.id })
+                setCopied(false)
+              }}
+              title={language === 'zh' ? (palette?.tagline ?? option.id) : option.id}
+            >
+              <span>{label(option.id)}</span>
+              {palette !== undefined ? (
+                <span className="dsh-ig-baoyu-swatch">
+                  {[palette.colors[0], palette.colors.find(color => color.role === 'Background'), palette.colors.find(color => color.role === 'Accent 1')].map((color, index) =>
+                    color === undefined ? null : <i key={index} style={{ background: color.hex }} />,
+                  )}
+                </span>
+              ) : null}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+
+  const copyPrompt = async (): Promise<void> => {
+    if (prompt === '') return
+    try {
+      await navigator.clipboard.writeText(prompt)
+      setCopied(true)
+      setCopyFailed(false)
+    } catch {
+      setCopyFailed(true)
+    }
+  }
+
+  return (
+    <div className="dsh-ig-baoyu-panel">
+      <div className="dsh-ig-baoyu-intro">
+        <strong className="dsh-ig-baoyu-combos">{tr('composeCombos', { count: String(combos) })}</strong>
+        <span className="dsh-ig-baoyu-hint">{tr('composeHint')}</span>
+      </div>
+      {dimension(tr('composeType'), 'type', BAOYU_TYPES)}
+      {dimension(tr('composePalette'), 'palette', BAOYU_PALETTES)}
+      {dimension(tr('composeRendering'), 'rendering', BAOYU_RENDERINGS)}
+      {dimension(tr('composeText'), 'text', BAOYU_TEXT_LEVELS)}
+      {dimension(tr('composeMood'), 'mood', BAOYU_MOODS)}
+      <div className="dsh-ig-baoyu-dim">
+        <div className="dsh-ig-baoyu-dim-head">{tr('composeTitleLabel')}</div>
+        <input
+          className="dsh-ig-baoyu-title-input"
+          value={selection.title}
+          placeholder={tr('composeTitlePlaceholder')}
+          disabled={selection.text === 'none'}
+          onChange={event => {
+            onChange({ ...selection, title: event.target.value })
+            setCopied(false)
+          }}
+        />
+        {needsTitle && !titleReady ? <div className="dsh-ig-baoyu-required">{tr('composeTitleRequired')}</div> : null}
+      </div>
+      <div className="dsh-ig-baoyu-actions">
+        <button type="button" className="dsh-ig-baoyu-btn" onClick={() => onChange(randomBaoyuSelection(selection))}>
+          <Shuffle size={13} />
+          <span>{tr('composeRandomize')}</span>
+        </button>
+        <button type="button" className="dsh-ig-baoyu-btn" disabled={prompt === ''} onClick={() => { void copyPrompt() }}>
+          {copied ? <Check size={13} /> : <Clipboard size={13} />}
+          <span>{copied ? tr('copied') : tr('copy')}</span>
+        </button>
+        <button type="button" className="dsh-ig-baoyu-btn is-primary" disabled={prompt === ''} onClick={() => onUsePrompt(prompt)}>
+          <Sparkles size={13} />
+          <span>{tr('composeUse')}</span>
+        </button>
+        {copyFailed ? <span className="dsh-ig-baoyu-required">{tr('copyFailed')}</span> : null}
+      </div>
+      {prompt !== '' ? (
+        <div className="dsh-ig-baoyu-preview-block">
+          <div className="dsh-ig-baoyu-preview-head">{tr('composePreview')}</div>
+          <pre className="dsh-ig-baoyu-preview">{prompt}</pre>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 const InspirationCard: FC<{
   item: InspirationCase
   sourceId: string
+  sourceRevision: string
   selected: boolean
   isFavorited: boolean
   language: Language
@@ -513,7 +842,7 @@ const InspirationCard: FC<{
   retryLabel?: string | undefined
   onSelect(): void
   onToggleFavorite(): void
-}> = ({ item, sourceId, selected, isFavorited, language, featuredLabel, retryLabel, onSelect, onToggleFavorite }) => (
+}> = ({ item, sourceId, sourceRevision, selected, isFavorited, language, featuredLabel, retryLabel, onSelect, onToggleFavorite }) => (
   <button type="button" className={`dsh-ig-inspiration-card ${selected ? 'is-selected' : ''}`} onClick={onSelect}>
     <div className="dsh-ig-inspiration-visual">
       {item.featured && <span className="dsh-ig-inspiration-featured"><Sparkles size={10} />{featuredLabel}</span>}
@@ -528,7 +857,7 @@ const InspirationCard: FC<{
       >
         <Star size={13} className={isFavorited ? 'fill-star' : ''} />
       </button>
-      <InspirationImage sourceId={sourceId} caseId={item.id} alt={item.imageAlt} retryLabel={retryLabel} />
+      <InspirationImage sourceId={sourceId} caseId={item.id} revision={sourceRevision} alt={item.imageAlt} retryLabel={retryLabel} />
     </div>
     <div className="dsh-ig-inspiration-card-copy">
       <strong>{item.title}</strong>
@@ -537,7 +866,7 @@ const InspirationCard: FC<{
   </button>
 )
 
-const InspirationImage: FC<{ sourceId: string; caseId: string; alt: string; retryLabel?: string | undefined }> = ({ sourceId, caseId, alt, retryLabel = 'Retry' }) => {
+const InspirationImage: FC<{ sourceId: string; caseId: string; revision: string; alt: string; retryLabel?: string | undefined }> = ({ sourceId, caseId, revision, alt, retryLabel = 'Retry' }) => {
   const [node, setNode] = useState<HTMLDivElement | null>(null)
   const [visible, setVisible] = useState(false)
   const [url, setUrl] = useState<string | null>(null)
@@ -560,7 +889,7 @@ const InspirationImage: FC<{ sourceId: string; caseId: string; alt: string; retr
       urlRef.current = null
     }
     setUrl(null)
-    void fetchInspirationImage(sourceId, caseId).then(blob => {
+    void fetchInspirationImage(sourceId, caseId, revision).then(blob => {
       if (!active) return
       const next = URL.createObjectURL(blob)
       if (urlRef.current !== null) {
@@ -572,7 +901,7 @@ const InspirationImage: FC<{ sourceId: string; caseId: string; alt: string; retr
     return () => {
       active = false
     }
-  }, [visible, sourceId, caseId])
+  }, [visible, sourceId, caseId, revision])
 
   useEffect(() => {
     return () => {
@@ -609,8 +938,8 @@ const InspirationImage: FC<{ sourceId: string; caseId: string; alt: string; retr
                   urlRef.current = null
                 }
                 setUrl(null)
-                void evictInspirationImage(sourceId, caseId)
-                  .then(() => fetchInspirationImage(sourceId, caseId))
+                void evictInspirationImage(sourceId, caseId, revision)
+                  .then(() => fetchInspirationImage(sourceId, caseId, revision))
                   .then(blob => {
                     const next = URL.createObjectURL(blob)
                     if (urlRef.current !== null) {

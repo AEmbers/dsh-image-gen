@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useState, useMemo, useRef, type FC, type MouseEvent } from 'react'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { IMAGE_ROUTE, DELETE_ROUTE, type ImageProvider } from '../shared.js'
+import { IMAGE_ROUTE, DELETE_ROUTE, IMPORT_ROUTE, type ImageProvider } from '../shared.js'
 import {
   Image as ImageIcon,
   SlidersHorizontal,
@@ -22,6 +22,7 @@ import {
   Check,
   AlertTriangle,
   Sparkles,
+  Upload,
 } from 'lucide-react'
 import {
   getGalleryItems,
@@ -71,6 +72,8 @@ const DICT = {
     filterXAI: 'xAI Grok',
     filterZhipu: '智谱 GLM',
     filterComfyUI: '本地 ComfyUI',
+    filterImport: '导入',
+    importImages: '导入图片', importAdded: '已导入 {count} 张图片', importPartial: '导入 {count} 张，{fail} 张失败', importFailed: '导入失败', importPickHint: '选择要导入的图片（PNG/JPG/WebP/GIF）',
     filterAllModels: '全部模型',
     filterAllRatios: '全部比例',
     searchPlaceholder: '搜索 Prompt、标签…',
@@ -180,6 +183,8 @@ const DICT = {
     filterXAI: 'xAI Grok',
     filterZhipu: 'Zhipu GLM',
     filterComfyUI: 'Local ComfyUI',
+    filterImport: 'Imported',
+    importImages: 'Import images', importAdded: 'Imported {count} images', importPartial: 'Imported {count}, {fail} failed', importFailed: 'Import failed', importPickHint: 'Choose images to import (PNG/JPG/WebP/GIF)',
     filterAllModels: 'All Models',
     filterAllRatios: 'All Ratios',
     searchPlaceholder: 'Search prompt, tags…',
@@ -275,6 +280,20 @@ const DICT = {
 export type DictKey = keyof typeof DICT.zh
 
 /** Format human-readable relative time */
+/** Read a browser-picked file as base64 payload for the import route. */
+function readFileBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result
+      if (typeof result === 'string') resolve(result.slice(result.indexOf(',') + 1))
+      else reject(new Error('read-failed'))
+    }
+    reader.onerror = () => reject(new Error('read-failed'))
+    reader.readAsDataURL(file)
+  })
+}
+
 function formatRelativeTime(
   timestamp: number,
   t: (key: DictKey, params?: Record<string, string>) => string
@@ -376,6 +395,7 @@ export const GalleryViewTab: FC<GalleryViewTabProps> = (props) => {
   const { locale, sessionId, useSessions, useWorkspaces, credentialEvents, inSidebar, defaultTab, initialCanvasSurface, useTabInfo } = props
   const [activeTab, setActiveTab] = useState<TabKey>(defaultTab ?? 'gallery')
   const [studioDraft, setStudioDraft] = useState<string | undefined>(undefined)
+  const [studioReference, setStudioReference] = useState<File | undefined>(undefined)
   const [items, setItems] = useState<GalleryItem[]>([])
   const [search, setSearch] = useState('')
   const [selectedProvider, setSelectedProvider] = useState<string>('all')
@@ -517,12 +537,82 @@ export const GalleryViewTab: FC<GalleryViewTabProps> = (props) => {
     }, 2000)
   }
 
+  const [importing, setImporting] = useState(false)
+  const importInputRef = useRef<HTMLInputElement | null>(null)
+
+  const importImages = async (files: FileList | null): Promise<void> => {
+    if (files === null || files.length === 0 || importing) return
+    const all = Array.from(files)
+    const picked = all.filter(file => file.type.startsWith('image/')).slice(0, 8)
+    if (picked.length === 0) {
+      showToast(t('importFailed'))
+      return
+    }
+    setImporting(true)
+    try {
+      const reads = await Promise.allSettled(picked.map(file => readFileBase64(file)))
+      const images = reads.flatMap((read, index) => {
+        if (read.status !== 'fulfilled') return []
+        const file = picked[index]!
+        return [{ data: read.value, mediaType: file.type, ...(file.name.length > 0 ? { name: file.name } : {}) }]
+      })
+      const readFailures = reads.length - images.length
+      if (images.length === 0) {
+        showToast(t('importFailed'))
+        return
+      }
+      const response = await fetch(IMPORT_ROUTE, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ images }),
+      })
+      if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+      const payload = await response.json() as { images?: { attachment: ImageAttachmentRef }[]; failures?: unknown[] }
+      const imported = payload.images ?? []
+      let added = 0
+      let writeFailures = 0
+      for (const entry of imported) {
+        // The attachment id is content-addressed, so re-importing bytes that
+        // already exist must not overwrite or alias the original gallery entry.
+        const persisted = await saveGalleryItem({
+          id: `import-${entry.attachment.attachmentId}-${crypto.randomUUID()}`,
+          attachment: entry.attachment,
+          prompt: '',
+          provider: 'import',
+          model: '',
+          createdAt: Date.now(),
+          ...(activeWorkspace?.workspaceId ? { workspaceId: activeWorkspace.workspaceId } : {}),
+          ...(activeWorkspace?.path ? { workspacePath: activeWorkspace.path } : {}),
+          ...(currentSessionId ? { sessionId: currentSessionId } : {}),
+        })
+        if (persisted) added += 1
+        else writeFailures += 1
+      }
+      const failCount = (payload.failures ?? []).length + (all.length - picked.length) + readFailures + writeFailures
+      if (added === 0) showToast(t('importFailed'))
+      else if (failCount > 0) showToast(t('importPartial', { count: String(added), fail: String(failCount) }))
+      else showToast(t('importAdded', { count: String(added) }))
+    } catch {
+      showToast(t('importFailed'))
+    } finally {
+      setImporting(false)
+    }
+  }
+
   const useInspirationPrompt = useCallback((prompt: string) => {
     setStudioDraft(prompt)
     setActiveTab('studio')
   }, [])
 
+  const useInspirationReference = useCallback((file: File, prompt: string) => {
+    setStudioDraft(prompt)
+    setStudioReference(file)
+    setActiveTab('studio')
+  }, [])
+
   const clearStudioDraft = useCallback(() => setStudioDraft(undefined), [])
+  const clearStudioReference = useCallback(() => setStudioReference(undefined), [])
 
   // Hide chat input composer while browsing gallery/studio. Only in the
   // conversation-view variant: the sidebar variant shares the screen with the
@@ -1219,6 +1309,7 @@ export const GalleryViewTab: FC<GalleryViewTabProps> = (props) => {
               <option value="xai">{t('filterXAI')}</option>
               <option value="zhipu">{t('filterZhipu')}</option>
               <option value="comfyui">{t('filterComfyUI')}</option>
+              <option value="import">{t('filterImport')}</option>
             </select>
 
             {/* Ratio Filter */}
@@ -1265,6 +1356,32 @@ export const GalleryViewTab: FC<GalleryViewTabProps> = (props) => {
           </div>
 
           <div className="dsh-ig-studio-toolbar-right">
+            {activeTab === 'gallery' && (
+              <>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={event => {
+                    void importImages(event.target.files)
+                    event.target.value = ''
+                  }}
+                />
+                <button
+                  type="button"
+                  className="dsh-ig-studio-btn"
+                  disabled={importing}
+                  title={t('importPickHint')}
+                  onClick={() => importInputRef.current?.click()}
+                >
+                  <Upload size={13} />
+                  <span>{t('importImages')}</span>
+                </button>
+              </>
+            )}
+
             {/* Sort Dropdown */}
             <select
               className="dsh-ig-studio-select dsh-ig-studio-select-sort"
@@ -1337,9 +1454,9 @@ export const GalleryViewTab: FC<GalleryViewTabProps> = (props) => {
             </div>
           )
         ) : activeTab === 'inspiration' ? (
-          <InspirationView locale={locale} onUsePrompt={useInspirationPrompt} />
+          <InspirationView locale={locale} onUsePrompt={useInspirationPrompt} onUseReference={useInspirationReference} />
         ) : (
-          <StudioView locale={locale} credentialEvents={credentialEvents} workspace={activeWorkspace} initialPrompt={studioDraft} initialCanvasSurface={initialCanvasSurface} showInfiniteCanvasHint={!inSidebar} onInitialPromptApplied={clearStudioDraft} onOpenInspiration={() => setActiveTab('inspiration')} />
+          <StudioView locale={locale} credentialEvents={credentialEvents} workspace={activeWorkspace} initialPrompt={studioDraft} initialReference={studioReference} initialCanvasSurface={initialCanvasSurface} showInfiniteCanvasHint={!inSidebar} onInitialPromptApplied={clearStudioDraft} onInitialReferenceApplied={clearStudioReference} onOpenInspiration={() => setActiveTab('inspiration')} />
         )}
       </div>
 
@@ -1522,7 +1639,7 @@ export const GalleryViewTab: FC<GalleryViewTabProps> = (props) => {
               <div className="dsh-ig-regenerate-modal-title-wrap">
                 <div className="dsh-ig-modal-title">{t('regenerateTitle')}</div>
                 <div className="dsh-ig-regenerate-modal-meta">
-                  <span className="dsh-ig-tag">{previewItem.provider}</span>
+                  <span className="dsh-ig-tag">{previewItem.provider === 'import' ? t('filterImport') : previewItem.provider}</span>
                   {previewItem.model && <span className="dsh-ig-tag dsh-ig-tag-model">{previewItem.model}</span>}
                   <span className="dsh-ig-tag">{formatCardMeta(previewItem)}</span>
                 </div>
@@ -1575,7 +1692,7 @@ export const GalleryViewTab: FC<GalleryViewTabProps> = (props) => {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="dsh-ig-lightbox-meta">
-              <span className="dsh-ig-tag">{previewItem.provider}</span>
+              <span className="dsh-ig-tag">{previewItem.provider === 'import' ? t('filterImport') : previewItem.provider}</span>
               {previewItem.model ? (
                 <span className="dsh-ig-tag dsh-ig-tag-model">{previewItem.model}</span>
               ) : null}

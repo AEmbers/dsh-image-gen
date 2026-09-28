@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BUNDLED_INSPIRATION_CATALOG, findInspirationCase, parseInspirationSnapshot, publicInspirationCatalog } from '../src/inspiration.js'
+import { BUNDLED_INSPIRATION_CATALOG, findInspirationCase, parseInspirationSnapshot, publicInspirationCatalog, searchInspirationCases } from '../src/inspiration.js'
 import { createInspirationRoute, drainCacheWrites } from '../src/inspiration-route.js'
 import { resolveActiveCatalog } from '../src/client/inspiration-view.js'
 
@@ -68,10 +68,29 @@ describe('inspiration HTTP route', () => {
     const url = await start(upstream)
     const catalog = await fetch(`${url}/catalog`, { headers: { origin: url } })
     expect(catalog.status).toBe(200)
-    expect((await catalog.json() as { sources: unknown[] }).sources).toHaveLength(1)
+    const sources = (await catalog.json() as { sources: { id: string; cases: unknown[] }[] }).sources
+    expect(sources.map(source => source.id)).toEqual(['awesome-gpt-image-2', 'handraw-style'])
+    expect(sources[1]!.cases.length).toBeGreaterThan(0)
     const blocked = await fetch(`${url}/image/not-an-allowed-source/1`, { headers: { origin: url } })
     expect(blocked.status).toBe(404)
     expect(upstream).not.toHaveBeenCalled()
+  })
+
+  it('pins handdraw-style images, including per-style individuals, to the snapshot commit', async () => {
+    const upstream = vi.fn<typeof fetch>(async () => new Response(new Uint8Array([7]), {
+      status: 200,
+      headers: { 'content-type': 'image/webp', 'content-length': '1' },
+    }))
+    const url = await start(upstream)
+    const handdraw = BUNDLED_INSPIRATION_CATALOG.sources.find(source => source.id === 'handraw-style')
+    const styleCase = handdraw!.cases.find(candidate => candidate.imagePath.startsWith('/images/individual/'))!
+    const remoteCase = handdraw!.cases.find(candidate => candidate.imagePath.startsWith('/images/colors/'))!
+    expect(styleCase.imagePath).toBe('/images/individual/001-200/001.webp')
+    for (const testCase of [styleCase, remoteCase]) {
+      const response = await fetch(`${url}/image/handraw-style/${testCase.id}`, { headers: { origin: url } })
+      expect(response.status).toBe(200)
+      expect(upstream).toHaveBeenCalledWith(`https://cdn.jsdelivr.net/gh/yang0/handraw-style@50998b094866e22007001161bca12c892a3796b1${testCase.imagePath}`, expect.objectContaining({ redirect: 'error' }))
+    }
   })
 
   it('resolves a known case server-side and proxies only an allowed image response', async () => {
@@ -259,5 +278,25 @@ describe('resolveActiveCatalog cache arbitration', () => {
     expect(resolveActiveCatalog(undefined, baseCatalog)).toBe(baseCatalog)
     expect(resolveActiveCatalog(baseCatalog, undefined)).toBe(baseCatalog)
     expect(resolveActiveCatalog(undefined, undefined)).toBeUndefined()
+  })
+})
+
+describe('searchInspirationCases', () => {
+  it('matches prompts, categories, and tags across both bundled libraries', () => {
+    const result = searchInspirationCases(BUNDLED_INSPIRATION_CATALOG, { query: '信息图', category: '排版 · 信息图' })
+    expect(result.total).toBeGreaterThan(0)
+    for (const hit of result.hits) expect(hit.category).toBe('排版 · 信息图')
+    const english = searchInspirationCases(BUNDLED_INSPIRATION_CATALOG, { query: 'logo' })
+    expect(english.total).toBeGreaterThan(0)
+    expect(english.hits.some(hit => hit.sourceId === 'awesome-gpt-image-2')).toBe(true)
+  })
+
+  it('respects source, category, and limit bounds', () => {
+    const handdraw = searchInspirationCases(BUNDLED_INSPIRATION_CATALOG, { query: '', sourceId: 'handraw-style', limit: 3 })
+    expect(handdraw.hits).toHaveLength(3)
+    expect(handdraw.total).toBeGreaterThanOrEqual(435)
+    expect(searchInspirationCases(BUNDLED_INSPIRATION_CATALOG, { query: '', limit: 99 }).hits.length).toBeLessThanOrEqual(20)
+    const exact = searchInspirationCases(BUNDLED_INSPIRATION_CATALOG, { query: '', category: '单色 · 中性色系' })
+    expect(exact.hits.every(hit => hit.category === '单色 · 中性色系')).toBe(true)
   })
 })
