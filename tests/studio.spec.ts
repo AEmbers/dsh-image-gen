@@ -1022,7 +1022,31 @@ describe('openai-compat size table', () => {
     expect(derived.ratioOptions.map(option => option.value)).toEqual(['1:1', '16:9'])
     expect(derived.qualityOptions.map(option => option.value)).toEqual(['1K', '2K', '4K'])
     expect(derived.defaultRatio).toBe('1:1')
+    // The 1:1 row tops out at 1K/4K: a global 2K default would silently
+    // downsample, so the default quality comes from the default ratio itself.
+    expect(derived.defaultQuality).toBe('1K')
+  })
+
+  it('keeps the default pair generatable on a sparse table', () => {
+    const sparse = { '16:9': { '1K': '1536x864' }, '21:9': { '2K': '5120x2176' } }
+    const derived = studioProfile({ openaiCompatSizes: sparse, openaiCompatModel: 'image-2', openaiCompatBaseURL: 'https://relay.example/v1' }, 'openai-compat', true)
+    // Old behavior picked the global 2K default here, and 16:9 offers nothing
+    // at or below it — the first generate would reject before any user input.
+    expect(derived.defaultRatio).toBe('16:9')
+    expect(derived.defaultQuality).toBe('1K')
+    expect(openAIRequestSize({ openaiCompatSizes: sparse }, derived.defaultRatio, derived.defaultQuality)).toBe('1536x864')
+  })
+
+  it('prefers 2K as the default when the default ratio offers it', () => {
+    const derived = studioProfile({ openaiCompatSizes: { '1:1': { '1K': '1024x1024', '2K': '2048x2048' } }, openaiCompatModel: 'image-2', openaiCompatBaseURL: 'https://relay.example/v1' }, 'openai-compat', true)
+    expect(derived.defaultRatio).toBe('1:1')
     expect(derived.defaultQuality).toBe('2K')
+  })
+
+  it('falls back to the default ratio\'s lowest tier when it has no 2K row', () => {
+    const derived = studioProfile({ openaiCompatSizes: { '4:3': { '1K': '1536x1152', '4K': '3072x2304' } }, openaiCompatModel: 'image-2', openaiCompatBaseURL: 'https://relay.example/v1' }, 'openai-compat', true)
+    expect(derived.defaultRatio).toBe('4:3')
+    expect(derived.defaultQuality).toBe('1K')
   })
 
   it('sends the exact configured size for a supported combination', () => {
