@@ -45,7 +45,7 @@ export async function generateOpenAICompatibleImage(input: {
 }
 
 /** How the edits endpoint expects its request body (#41). */
-export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray'
+export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages'
 
 export async function editOpenAICompatibleImage(input: {
   apiKey: string
@@ -91,6 +91,22 @@ export async function editOpenAICompatibleImage(input: {
     })
     return parseImageResponse(response, 'openai', input)
   }
+  if (input.editFormat === 'formReferenceImages') {
+    // Some relays take edits as a multipart form whose `reference_images`
+    // field is a JSON array of base64 strings instead of file uploads.
+    const form = new FormData()
+    form.append('model', input.model)
+    form.append('prompt', input.prompt)
+    if (input.size !== undefined && input.size.length > 0) form.append('size', input.size)
+    form.append('response_format', 'b64_json')
+    form.append('reference_images', JSON.stringify(input.sourceImages.map(sourceImage => Buffer.from(sourceImage.data).toString('base64'))))
+    const response = await fetch(imageEndpoint(input.baseURL, 'edits'), {
+      method: 'POST', redirect: 'error', signal: input.signal,
+      headers: { authorization: `Bearer ${input.apiKey}` },
+      body: form,
+    })
+    return parseImageResponse(response, 'openai', input)
+  }
   const form = new FormData()
   const imageField = input.sourceImages.length > 1 ? 'image[]' : 'image'
   input.sourceImages.forEach((sourceImage, index) => {
@@ -122,7 +138,12 @@ async function parseImageResponse(
   try { payload = JSON.parse(text) } catch { throw new Error(`${provider} image request returned invalid JSON`) }
   const image = firstImage(payload)
   if (image === undefined) throw new Error(`${provider} image request returned no image: ${redactSecrets(text, input.apiKey).slice(0, ERROR_LIMIT)}`)
-  if (image.b64_json !== undefined) return { data: decodeBase64(image.b64_json, provider), mediaType: imageMediaType(image.mime_type) ?? 'image/png' }
+  if (image.b64_json !== undefined) {
+    // Relays may omit mime_type while returning non-PNG bytes (Ark jpeg), so
+    // sniff before trusting the header to avoid IMAGE_TYPE_MISMATCH (#61).
+    const data = decodeBase64(image.b64_json, provider)
+    return { data, mediaType: detectImageMediaType(data) ?? imageMediaType(image.mime_type) ?? 'image/png' }
+  }
   return downloadImage(image.url, provider, input)
 }
 
@@ -162,7 +183,8 @@ async function downloadImage(
   if (url.startsWith('data:')) {
     const parsed = parseDataUrl(url)
     if (parsed === undefined) throw new Error(`${provider} image request returned invalid data URL`)
-    return { data: decodeBase64(parsed.base64, provider), mediaType: imageMediaType(parsed.mediaType) ?? 'image/png' }
+    const data = decodeBase64(parsed.base64, provider)
+    return { data, mediaType: detectImageMediaType(data) ?? imageMediaType(parsed.mediaType) ?? 'image/png' }
   }
   let response = await fetch(url, {
     redirect: 'follow', signal: input.signal,

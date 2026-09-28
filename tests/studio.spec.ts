@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_SEEDREAM_MODEL, DEFAULT_DASHSCOPE_MODEL } from '../src/config.js'
-import { generateFromStudio, runPool, studioProfile, describeStudio } from '../src/studio.js'
+import { generateFromStudio, runPool, studioProfile, describeStudio, openAIRequestSize } from '../src/studio.js'
 import { parseStudioGenerateRequest, serveStudio } from '../src/studio-route.js'
 import { SUBSCRIPTION_PROVIDERS, DEFAULT_SUBSCRIPTION_MODELS, SUBSCRIPTION_TIMEOUT_MS, STUDIO_PROVIDERS, CLOUD_IMAGE_PROVIDERS, type SubscriptionProvider } from '../src/shared.js'
 import type { SubscriptionManager, SubscriptionVendor } from '../src/subscription/manager.js'
@@ -126,9 +126,10 @@ describe('image workbench request validation', () => {
     })).toThrow('5')
   })
 
-  it('rejects ComfyUI and oversized prompts at the browser boundary', () => {
+  it('rejects ComfyUI at the browser boundary and accepts long prompts', () => {
     expect(() => parseStudioGenerateRequest({ ...base, provider: 'comfyui' as never })).toThrow('Provider')
-    expect(() => parseStudioGenerateRequest({ ...base, prompt: 'x'.repeat(2_001) })).toThrow('2000')
+    expect(() => parseStudioGenerateRequest({ ...base, prompt: '' })).toThrow('请输入提示词')
+    expect(parseStudioGenerateRequest({ ...base, prompt: 'x'.repeat(20_000) })).toMatchObject({ prompt: 'x'.repeat(20_000) })
   })
 
   it('preserves valid workspaceRoot when provided', () => {
@@ -1002,3 +1003,135 @@ function stubSubscriptionManager(statuses: Partial<Record<SubscriptionProvider, 
   }
   return manager as unknown as StubSubscriptionManager
 }
+
+describe('openai-compat size table', () => {
+  const table = {
+    '1:1': { '1K': '1024x1024', '4K': '4096x4096' },
+    '16:9': { '1K': '1536x864', '2K': '2048x1152', '4K': '3840x2160' },
+  }
+
+  it('keeps the legacy standard profile when no table is configured', () => {
+    const legacy = studioProfile({}, 'openai-compat', true)
+    expect(legacy.ratioOptions.map(option => option.value)).toEqual(['1:1', '3:2', '2:3'])
+    expect(legacy.qualityOptions).toEqual([{ value: 'standard', label: '标准（推荐）' }])
+    expect(legacy.defaultQuality).toBe('standard')
+    expect(openAIRequestSize({}, '3:2', 'standard')).toBe('1536x1024')
+  })
+
+  it('derives ratio and tier options from the configured table', () => {
+    const derived = studioProfile({ openaiCompatSizes: table, openaiCompatModel: 'image-2', openaiCompatBaseURL: 'https://relay.example/v1' }, 'openai-compat', true)
+    expect(derived.ratioOptions.map(option => option.value)).toEqual(['1:1', '16:9'])
+    expect(derived.qualityOptions.map(option => option.value)).toEqual(['1K', '2K', '4K'])
+    expect(derived.defaultRatio).toBe('1:1')
+    // The 1:1 row tops out at 1K/4K: a global 2K default would silently
+    // downsample, so the default quality comes from the default ratio itself.
+    expect(derived.defaultQuality).toBe('1K')
+  })
+
+  it('keeps the default pair generatable on a sparse table', () => {
+    const sparse = { '16:9': { '1K': '1536x864' }, '21:9': { '2K': '5120x2176' } }
+    const derived = studioProfile({ openaiCompatSizes: sparse, openaiCompatModel: 'image-2', openaiCompatBaseURL: 'https://relay.example/v1' }, 'openai-compat', true)
+    // Old behavior picked the global 2K default here, and 16:9 offers nothing
+    // at or below it — the first generate would reject before any user input.
+    expect(derived.defaultRatio).toBe('16:9')
+    expect(derived.defaultQuality).toBe('1K')
+    expect(openAIRequestSize({ openaiCompatSizes: sparse }, derived.defaultRatio, derived.defaultQuality)).toBe('1536x864')
+  })
+
+  it('prefers 2K as the default when the default ratio offers it', () => {
+    const derived = studioProfile({ openaiCompatSizes: { '1:1': { '1K': '1024x1024', '2K': '2048x2048' } }, openaiCompatModel: 'image-2', openaiCompatBaseURL: 'https://relay.example/v1' }, 'openai-compat', true)
+    expect(derived.defaultRatio).toBe('1:1')
+    expect(derived.defaultQuality).toBe('2K')
+  })
+
+  it('falls back to the default ratio\'s lowest tier when it has no 2K row', () => {
+    const derived = studioProfile({ openaiCompatSizes: { '4:3': { '1K': '1536x1152', '4K': '3072x2304' } }, openaiCompatModel: 'image-2', openaiCompatBaseURL: 'https://relay.example/v1' }, 'openai-compat', true)
+    expect(derived.defaultRatio).toBe('4:3')
+    expect(derived.defaultQuality).toBe('1K')
+  })
+
+  it('sends the exact configured size for a supported combination', () => {
+    expect(openAIRequestSize({ openaiCompatSizes: table }, '16:9', '2K')).toBe('2048x1152')
+  })
+
+  it('falls down to the largest tier below the request, never up', () => {
+    expect(openAIRequestSize({ openaiCompatSizes: table }, '16:9', '4K')).toBe('3840x2160')
+    expect(openAIRequestSize({ openaiCompatSizes: table }, '1:1', '2K')).toBe('1024x1024')
+  })
+
+  it('rejects a ratio that offers nothing at or below the requested tier', () => {
+    expect(() => openAIRequestSize({ openaiCompatSizes: { '1:1': { '4K': '4096x4096' } } }, '1:1', '1K')).toThrow('清晰度')
+  })
+
+  it('keeps the legacy trio mapping for ratios outside the table', () => {
+    expect(openAIRequestSize({ openaiCompatSizes: table }, '2:3', '1K')).toBe('1024x1536')
+  })
+})
+
+describe('streaming generation heartbeat', () => {
+  it('sends headers plus heartbeat newlines while generating, then a parseable JSON body', async () => {
+    const server = createServer()
+    const url = await new Promise<string>((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as AddressInfo
+        resolve(`http://127.0.0.1:${addr.port}`)
+      })
+    })
+    try {
+      server.on('request', (req, res) => {
+        void serveStudio(req, res, {
+          describe: async () => ({ providers: [], activeProvider: 'google' }),
+          generate: async () => {
+            await new Promise(resolve => setTimeout(resolve, 120))
+            return {
+              attachment: { attachmentId: 'sha256:x' as any, mediaType: 'image/png' as const, bytes: 1, width: 1, height: 1 },
+              prompt: 'p', provider: 'google', model: DEFAULT_GOOGLE_MODEL, output: '1:1', createdAt: 1,
+            }
+          },
+          maxBodyBytes: 1024 * 1024,
+          heartbeatMs: 30,
+        })
+      })
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mode: 'generate', provider: 'google', model: DEFAULT_GOOGLE_MODEL, prompt: 'lake', ratio: '1:1', quality: '1K' }),
+      })
+      expect(response.headers.get('x-accel-buffering')).toBe('no')
+      const text = await response.text()
+      expect(text.startsWith('\n')).toBe(true)
+      expect('attachment' in (JSON.parse(text) as Record<string, unknown>)).toBe(true)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('reports generation failures as { error } bodies after headers are sent', async () => {
+    const server = createServer()
+    const url = await new Promise<string>((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as AddressInfo
+        resolve(`http://127.0.0.1:${addr.port}`)
+      })
+    })
+    try {
+      server.on('request', (req, res) => {
+        void serveStudio(req, res, {
+          describe: async () => ({ providers: [], activeProvider: 'google' }),
+          generate: async () => { throw new Error('provider exploded') },
+          maxBodyBytes: 1024 * 1024,
+          heartbeatMs: 30,
+        })
+      })
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mode: 'generate', provider: 'google', model: DEFAULT_GOOGLE_MODEL, prompt: 'lake', ratio: '1:1', quality: '1K' }),
+      })
+      expect(response.status).toBe(200)
+      expect(JSON.parse(await response.text())).toMatchObject({ error: 'provider exploded' })
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+})
