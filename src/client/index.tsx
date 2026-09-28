@@ -2448,7 +2448,6 @@ function ImageResultCard({
           <textarea
             ref={regenerateTextareaRef}
             value={regeneratePrompt}
-            maxLength={2000}
             disabled={isRegenerating}
             onChange={(event) => setRegeneratePrompt(event.target.value)}
             onKeyDown={(event) => {

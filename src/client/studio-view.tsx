@@ -1626,7 +1626,6 @@ export const StudioView: FC<{
               <textarea
                 id="dsh-ig-prompt"
                 value={prompt}
-                maxLength={2000}
                 onChange={event => setPrompt(event.target.value)}
                 onKeyDown={event => {
                   if (event.nativeEvent.isComposing) return
@@ -1637,7 +1636,7 @@ export const StudioView: FC<{
                 }}
                 placeholder={t('promptPlaceholder')}
               />
-              <small>{prompt.length}/2000</small>
+              <small>{prompt.length}</small>
             </div>
             {config === null ? (
               configLoading ? (

@@ -126,9 +126,10 @@ describe('image workbench request validation', () => {
     })).toThrow('5')
   })
 
-  it('rejects ComfyUI and oversized prompts at the browser boundary', () => {
+  it('rejects ComfyUI at the browser boundary and accepts long prompts', () => {
     expect(() => parseStudioGenerateRequest({ ...base, provider: 'comfyui' as never })).toThrow('Provider')
-    expect(() => parseStudioGenerateRequest({ ...base, prompt: 'x'.repeat(2_001) })).toThrow('2000')
+    expect(() => parseStudioGenerateRequest({ ...base, prompt: '' })).toThrow('请输入提示词')
+    expect(parseStudioGenerateRequest({ ...base, prompt: 'x'.repeat(20_000) })).toMatchObject({ prompt: 'x'.repeat(20_000) })
   })
 
   it('preserves valid workspaceRoot when provided', () => {
