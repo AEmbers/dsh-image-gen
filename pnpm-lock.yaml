@@ -7,13 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      lucide-react:
-        specifier: ^1.38.0
-        version: 1.38.0(react@18.3.1)
-      tldraw:
-        specifier: 5.3.0
-        version: 5.3.0(@floating-ui/dom@1.8.0)(@types/react-dom@19.2.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.4
@@ -78,12 +71,18 @@ importers:
       '@types/react':
         specifier: ~18.3.1
         version: 18.3.31
+      lucide-react:
+        specifier: ^1.38.0
+        version: 1.38.0(react@18.3.1)
       react:
         specifier: ^18.2.0
         version: 18.3.1
       react-dom:
         specifier: 18.3.1
         version: 18.3.1(react@18.3.1)
+      tldraw:
+        specifier: 5.3.0
+        version: 5.3.0(@floating-ui/dom@1.8.0)(@types/react-dom@19.2.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       tsdown:
         specifier: ^0.22.2
         version: 0.22.14(typescript@6.0.3)(unrun@0.3.1)
