@@ -108,8 +108,8 @@ const DEFAULT_PROJECT_ID = 'rising-fact-p41fc'
 /** Generation timeout mirroring the reference implementation. */
 const IMAGE_TIMEOUT_MS = 120_000
 
-/** Aspect ratios the generationConfig.imageConfig accepts. */
-const ASPECT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '21:9'] as const
+/** Aspect ratios the generationConfig.imageConfig accepts (gemini-3-pro-image). */
+const ASPECT_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'] as const
 
 /** Safety settings the image endpoint requires to not block benign prompts. */
 const SAFETY_SETTINGS_OFF = [
@@ -280,8 +280,10 @@ export function antigravityImageBody(options: {
   hd?: boolean
   referenceImages?: ReadonlyArray<{ data: Uint8Array; mediaType: string }>
 }): Record<string, unknown> {
-  const ratio = options.aspectRatio !== undefined && (ASPECT_RATIOS as readonly string[]).includes(options.aspectRatio) ? options.aspectRatio : '1:1'
-  const imageConfig: Record<string, unknown> = { aspectRatio: ratio }
+  const ratio = options.aspectRatio !== undefined && (ASPECT_RATIOS as readonly string[]).includes(options.aspectRatio) ? options.aspectRatio : undefined
+  // An unset aspectRatio lets the model choose (the `auto` picker option);
+  // the API's own default applies. HD maps onto the documented 4K tier.
+  const imageConfig: Record<string, unknown> = ratio === undefined ? {} : { aspectRatio: ratio }
   if (options.hd === true) imageConfig.imageSize = '4K'
   const parts: Array<Record<string, unknown>> = []
   for (const image of options.referenceImages ?? []) {

@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_SEEDREAM_MODEL, DEFAULT_DASHSCOPE_MODEL } from '../src/config.js'
+import { DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_SEEDREAM_MODEL, DEFAULT_DASHSCOPE_MODEL, DEFAULT_XAI_MODEL, DEFAULT_ZHIPU_MODEL } from '../src/config.js'
 import { generateFromStudio, runPool, studioProfile, describeStudio, openAIRequestSize } from '../src/studio.js'
 import { parseStudioGenerateRequest, serveStudio } from '../src/studio-route.js'
-import { SUBSCRIPTION_PROVIDERS, DEFAULT_SUBSCRIPTION_MODELS, SUBSCRIPTION_TIMEOUT_MS, STUDIO_PROVIDERS, CLOUD_IMAGE_PROVIDERS, type SubscriptionProvider } from '../src/shared.js'
+import { SUBSCRIPTION_PROVIDERS, DEFAULT_SUBSCRIPTION_MODELS, SUBSCRIPTION_TIMEOUT_MS, STUDIO_PROVIDERS, CLOUD_IMAGE_PROVIDERS, type StudioProvider, type SubscriptionProvider } from '../src/shared.js'
+import { SUBSCRIPTION_CAPABILITIES } from '../src/capabilities.js'
 import type { SubscriptionManager, SubscriptionVendor } from '../src/subscription/manager.js'
 import {
   fetchAttachmentBlob,
@@ -20,7 +21,7 @@ import {
   loadConversationImageRevisionChain,
   selectConversationImageRevision,
 } from '../src/client/conversation-image-revisions.js'
-import { buildComparisonTargets, initialComparisonProviders } from '../src/client/multi-model-compare.js'
+import { buildComparisonTargets, comparisonOptionUnion, initialComparisonProviders } from '../src/client/multi-model-compare.js'
 
 describe('multi-model comparison planning', () => {
   const profiles = [
@@ -43,8 +44,29 @@ describe('multi-model comparison planning', () => {
       adjusted: target.adjusted,
     }))).toEqual([
       { provider: 'google', ratio: '16:9', quality: '4K', adjusted: false },
-      { provider: 'openai', ratio: '1:1', quality: 'standard', adjusted: true },
-      { provider: 'seedream', ratio: 'auto', quality: '4K', adjusted: true },
+      // openai speaks 16:9 now but tops out at low/medium/high, so only the
+      // quality falls back to its default.
+      { provider: 'openai', ratio: '16:9', quality: 'auto', adjusted: true },
+      { provider: 'seedream', ratio: '16:9', quality: '4K', adjusted: false },
+    ])
+  })
+
+  it('unions configured profile options for the shared comparison pickers in canonical order', () => {
+    const chatgptSub = {
+      provider: 'chatgpt-sub' as StudioProvider,
+      label: 'ChatGPT 订阅',
+      model: DEFAULT_SUBSCRIPTION_MODELS['chatgpt-sub'],
+      configured: true,
+      supportsEditing: true,
+      ...SUBSCRIPTION_CAPABILITIES['chatgpt-sub'],
+    }
+    const unionProfiles = [...profiles, chatgptSub]
+    expect(comparisonOptionUnion(unionProfiles, 'ratioOptions').map(option => option.value)).toEqual([
+      'auto', '1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9',
+    ])
+    // dashscope is signed out above, so its `standard` tier stays out of the union.
+    expect(comparisonOptionUnion(unionProfiles, 'qualityOptions').map(option => option.value)).toEqual([
+      'auto', '1K', '2K', '3K', '4K', 'low', 'medium', 'high', 'xhigh', 'max',
     ])
   })
 })
@@ -53,21 +75,36 @@ describe('image workbench provider capabilities', () => {
   it('exposes only parameters implemented by each cloud adapter', () => {
     const google = studioProfile({}, 'google', true)
     expect(google).toMatchObject({ model: DEFAULT_GOOGLE_MODEL, defaultRatio: '1:1', defaultQuality: '1K', configured: true })
-    expect(google.ratioOptions.map(option => option.value)).toContain('16:9')
+    expect(google.ratioOptions.map(option => option.value)).toEqual(['1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9'])
     expect(google.qualityOptions.map(option => option.value)).toEqual(['1K', '2K', '4K'])
 
     const openai = studioProfile({}, 'openai', false)
-    expect(openai).toMatchObject({ model: DEFAULT_OPENAI_MODEL, configured: false })
-    expect(openai.ratioOptions.map(option => option.value)).toEqual(['1:1', '3:2', '2:3'])
-    expect(openai.qualityOptions).toEqual([{ value: 'standard', label: '标准（推荐）' }])
+    expect(openai).toMatchObject({ model: DEFAULT_OPENAI_MODEL, defaultRatio: '1:1', defaultQuality: 'auto', configured: false })
+    expect(openai.ratioOptions.map(option => option.value)).toEqual(['1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16'])
+    expect(openai.qualityOptions.map(option => option.value)).toEqual(['auto', 'low', 'medium', 'high'])
 
     const seedream = studioProfile({}, 'seedream', true)
     expect(seedream).toMatchObject({ model: DEFAULT_SEEDREAM_MODEL, defaultRatio: 'auto', defaultQuality: '2K', configured: true })
-    expect(seedream.qualityOptions.map(o => o.value)).toEqual(['1K', '2K', '4K'])
+    // Seedream 5.0 dropped the 1K tier and gained 3K; picking 1K used to be a
+    // guaranteed upstream error.
+    expect(seedream.ratioOptions.map(o => o.value)).toEqual(['auto', '1:1', '4:3', '3:4', '16:9', '9:16', '3:2', '2:3', '21:9'])
+    expect(seedream.qualityOptions.map(o => o.value)).toEqual(['2K', '3K', '4K'])
 
     const dashscope = studioProfile({}, 'dashscope', true)
     expect(dashscope).toMatchObject({ model: DEFAULT_DASHSCOPE_MODEL, defaultRatio: '1:1', defaultQuality: 'standard', configured: true })
-    expect(dashscope.ratioOptions.map(o => o.value)).toEqual(['1:1', '3:2', '2:3', '16:9', '9:16'])
+    expect(dashscope.ratioOptions.map(o => o.value)).toEqual(['1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16'])
+
+    // xAI takes aspect_ratio+resolution, not size — the profile must not offer
+    // pixel tiers it cannot express.
+    const xai = studioProfile({}, 'xai', true)
+    expect(xai).toMatchObject({ model: DEFAULT_XAI_MODEL, defaultRatio: 'auto', defaultQuality: '1k', configured: true })
+    expect(xai.ratioOptions.map(o => o.value)).toEqual(['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16', '21:9'])
+    expect(xai.qualityOptions.map(o => o.value)).toEqual(['1k', '2k'])
+
+    const zhipu = studioProfile({}, 'zhipu', true)
+    expect(zhipu).toMatchObject({ model: DEFAULT_ZHIPU_MODEL, defaultRatio: '1:1', defaultQuality: 'hd', configured: true })
+    expect(zhipu.ratioOptions.map(o => o.value)).toEqual(['1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16'])
+    expect(zhipu.qualityOptions.map(o => o.value)).toEqual(['hd'])
   })
 
   it('does not expose ComfyUI through the first workbench release', () => {
@@ -176,7 +213,7 @@ describe('subscription workbench profiles', () => {
     expect((await manager.loginStatus('grok')).state).toBe('logged-out')
   })
 
-  it('exposes signed-in subscriptions as configured rows with channel-default parameters', async () => {
+  it('exposes signed-in subscriptions as configured rows with their full parameter pickers', async () => {
     const manager = stubSubscriptionManager({
       'chatgpt-sub': { state: 'logged-in', email: 'user@example.com' },
       'grok-sub': { state: 'logged-in', email: 'user@example.com' },
@@ -195,11 +232,18 @@ describe('subscription workbench profiles', () => {
       defaultRatio: 'auto',
       defaultQuality: 'auto',
     })
-    expect(chatgpt.ratioOptions).toEqual([{ value: 'auto', label: '通道默认' }])
-    expect(chatgpt.qualityOptions).toEqual([{ value: 'auto', label: '通道默认' }])
+    expect(chatgpt.ratioOptions.map(o => o.value)).toEqual(['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16'])
+    expect(chatgpt.qualityOptions.map(o => o.value)).toEqual(['auto', 'low', 'medium', 'high', 'xhigh', 'max'])
 
-    expect(byProvider.get('grok-sub')!.configured).toBe(true)
-    expect(byProvider.get('google-sub')!.configured).toBe(false)
+    const grok = byProvider.get('grok-sub')!
+    expect(grok).toMatchObject({ configured: true, defaultRatio: 'auto', defaultQuality: '1k' })
+    expect(grok.ratioOptions.map(o => o.value)).toEqual(['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16', '21:9'])
+    expect(grok.qualityOptions.map(o => o.value)).toEqual(['1k', '2k'])
+
+    const googleSub = byProvider.get('google-sub')!
+    expect(googleSub).toMatchObject({ configured: false, defaultRatio: 'auto', defaultQuality: 'standard' })
+    expect(googleSub.ratioOptions.map(o => o.value)).toEqual(['auto', '1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9'])
+    expect(googleSub.qualityOptions.map(o => o.value)).toEqual(['standard', 'hd'])
   })
 
   it('falls back to the first configured provider when the preference cannot drive the workbench', async () => {
@@ -256,7 +300,7 @@ describe('subscription workbench generation', () => {
         model: DEFAULT_SUBSCRIPTION_MODELS['grok-sub'],
         prompt: 'a warm editorial portrait',
         ratio: 'auto',
-        quality: 'auto',
+        quality: '1k',
         references: [{ data: Buffer.from('stub-image').toString('base64'), mediaType: 'image/png' }],
       },
       new AbortController().signal,
@@ -282,7 +326,7 @@ describe('subscription workbench generation', () => {
         model: DEFAULT_SUBSCRIPTION_MODELS['grok-sub'],
         prompt: 'a warm editorial portrait',
         ratio: 'auto',
-        quality: 'auto',
+        quality: '1k',
       },
       new AbortController().signal,
       undefined,
@@ -302,7 +346,7 @@ describe('subscription workbench generation', () => {
         model: DEFAULT_SUBSCRIPTION_MODELS['grok-sub'],
         prompt: 'a warm editorial portrait',
         ratio: 'auto',
-        quality: 'auto',
+        quality: '1k',
         references: [{ data: 'not-valid-base64!!', mediaType: 'image/png' }],
       },
       new AbortController().signal,
@@ -340,7 +384,7 @@ describe('subscription workbench generation', () => {
         model: DEFAULT_SUBSCRIPTION_MODELS['google-sub'],
         prompt: 'a warm editorial portrait',
         ratio: 'auto',
-        quality: 'auto',
+        quality: 'standard',
         count: 3,
       },
       new AbortController().signal,
@@ -356,19 +400,18 @@ describe('subscription workbench generation', () => {
 })
 
 describe('mixed subscription and API comparison planning', () => {
+  // Mirror the real subscription pickers from the capability table so the
+  // mapping assertions stay honest when the table changes.
   const subProfile = (provider: SubscriptionProvider, configured: boolean) => ({
     provider,
     label: provider,
     model: DEFAULT_SUBSCRIPTION_MODELS[provider],
     configured,
     supportsEditing: true,
-    ratioOptions: [{ value: 'auto', label: '通道默认' }],
-    qualityOptions: [{ value: 'auto', label: '通道默认' }],
-    defaultRatio: 'auto',
-    defaultQuality: 'auto',
+    ...SUBSCRIPTION_CAPABILITIES[provider],
   })
 
-  it('keeps API-key rows adjustable while subscription rows fall back to channel defaults', () => {
+  it('maps one shared intent onto mixed API-key and subscription rows', () => {
     const profiles = [
       studioProfile({}, 'google', true),
       studioProfile({}, 'openai', true),
@@ -382,8 +425,9 @@ describe('mixed subscription and API comparison planning', () => {
       quality: target.quality,
     }))).toEqual([
       { provider: 'google', ratio: '16:9', quality: '4K' },
-      { provider: 'openai', ratio: '1:1', quality: 'standard' },
-      { provider: 'chatgpt-sub', ratio: 'auto', quality: 'auto' },
+      // Both speak 16:9 now; neither has a 4K tier, so quality alone falls back.
+      { provider: 'openai', ratio: '16:9', quality: 'auto' },
+      { provider: 'chatgpt-sub', ratio: '16:9', quality: 'auto' },
     ])
   })
 

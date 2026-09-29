@@ -285,7 +285,7 @@ pnpm dsh plugin --profile web add ./dsh-image-gen
 
 > Studio 与多模型对比目前只支持云端 Provider（含订阅通道）；多模型对比调用的是各 Provider 在设置中已配置的模型。
 > 智谱 GLM-Image 上游本身不支持图生图；xAI 图生图走 OpenAI 兼容协议（multipart），部分网关可能需等待后续适配。
-> 订阅通道通过账号登录使用（免 API Key），支持对话文生图 / 图生图、Studio 批量生成与多模型对比；图生图走各订阅渠道的编辑接口，参数为通道默认（最多 5 张参考图）。
+> 订阅通道通过账号登录使用（免 API Key），支持对话文生图 / 图生图、Studio 批量生成与多模型对比；图生图走各订阅渠道的编辑接口（最多 5 张参考图），比例与清晰度可在 Studio 中直接选择。
 
 <details>
 <summary><strong>当前默认模型与 Endpoint（均可修改）</strong></summary>
@@ -303,6 +303,27 @@ pnpm dsh plugin --profile web add ./dsh-image-gen
 | ChatGPT 订阅       | `gpt-image-2.5-flare`（通道固定） | 账号登录，无需配置                                        |
 | Grok 订阅         | `grok-imagine-image-2.0`（通道固定） | 账号登录，无需配置                                    |
 | Google 订阅       | `gemini-3-pro-image`（通道固定） | 账号登录，无需配置                                        |
+
+</details>
+
+<details>
+<summary><strong>各 Provider 可选比例与清晰度</strong></summary>
+
+| Provider           | 比例                                                              | 清晰度                                  |
+| :----------------- | :---------------------------------------------------------------- | :-------------------------------------- |
+| Google Gemini      | 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 4:5 · 5:4 · 16:9 · 9:16 · 21:9      | 1K / 2K / 4K                            |
+| OpenAI Images      | 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16                         | 自动 / low / medium / high              |
+| OpenAI Compatible  | 由 `openaiCompatSizes` 配置决定（默认 1:1 · 3:2 · 2:3）           | 同上（默认 standard）                   |
+| ByteDance Seedream | 自动 · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 · 21:9           | 2K / 3K / 4K                            |
+| Aliyun DashScope   | 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16                         | 标准                                    |
+| xAI Grok Imagine   | 自动 · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 · 21:9           | 1K / 2K                                 |
+| 智谱 GLM-Image     | 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16                         | 高清                                    |
+| ChatGPT 订阅       | 自动 · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16                  | 自动 / low / medium / high / xhigh / max |
+| Grok 订阅          | 自动 · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 · 21:9           | 1K / 2K                                 |
+| Google 订阅        | 自动 · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 4:5 · 5:4 · 16:9 · 9:16 · 21:9 | 标准 / 高清（4K）                     |
+
+> 「自动」比例表示由模型按 Prompt 自行决定构图；上游已移除的档位（如 Seedream 5.0 的 1K）插件不会暴露。
+> OpenAI Compatible（中转站）的比例与清晰度由设置中的 `openaiCompatSizes` 表驱动，格式为「比例 → 档位 → 像素」，例如 `{ "16:9": { "2K": "2048x1152" } }`；留空时保持 1:1 / 3:2 / 2:3 + standard 的兼容行为。
 
 </details>
 

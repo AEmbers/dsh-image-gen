@@ -285,7 +285,7 @@ Bring private image generation on your local GPU directly into Agent conversatio
 
 > Studio and multi-model comparison currently support cloud Providers only (subscription channels included). Multi-model comparison uses the model configured for each Provider in Settings.
 > Zhipu GLM-Image does not support image-to-image upstream. xAI image editing goes through the OpenAI-compatible protocol (multipart); some gateways may need further adaptation.
-> Subscription channels work through account sign-in (no API key). They support in-chat text-to-image / image-to-image, Studio batch generation, and multi-model comparison; edits ride each channel's edit endpoint with channel-default parameters (up to 5 reference images).
+> Subscription channels work through account sign-in (no API key). They support in-chat text-to-image / image-to-image, Studio batch generation, and multi-model comparison; edits ride each channel's edit endpoint (up to 5 reference images), with aspect ratio and quality selectable directly in Studio.
 
 <details>
 <summary><strong>Current default models and endpoints (all configurable)</strong></summary>
@@ -303,6 +303,27 @@ Bring private image generation on your local GPU directly into Agent conversatio
 | ChatGPT subscription | `gpt-image-2.5-flare` (channel-fixed) | Account sign-in, no configuration |
 | Grok subscription | `grok-imagine-image-2.0` (channel-fixed) | Account sign-in, no configuration |
 | Google subscription | `gemini-3-pro-image` (channel-fixed) | Account sign-in, no configuration |
+
+</details>
+
+<details>
+<summary><strong>Aspect ratios and quality tiers per Provider</strong></summary>
+
+| Provider | Aspect ratios | Quality tiers |
+| :--- | :--- | :--- |
+| Google Gemini | 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 4:5 · 5:4 · 16:9 · 9:16 · 21:9 | 1K / 2K / 4K |
+| OpenAI Images | 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 | auto / low / medium / high |
+| OpenAI Compatible | Driven by `openaiCompatSizes` (default 1:1 · 3:2 · 2:3) | Same table (default standard) |
+| ByteDance Seedream | auto · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 · 21:9 | 2K / 3K / 4K |
+| Aliyun DashScope | 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 | standard |
+| xAI Grok Imagine | auto · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 · 21:9 | 1K / 2K |
+| Zhipu GLM-Image | 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 | hd |
+| ChatGPT subscription | auto · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 | auto / low / medium / high / xhigh / max |
+| Grok subscription | auto · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 · 21:9 | 1K / 2K |
+| Google subscription | auto · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 4:5 · 5:4 · 16:9 · 9:16 · 21:9 | standard / HD (4K) |
+
+> An `auto` ratio lets the model pick the framing from the prompt; tiers the upstream dropped (e.g. Seedream 5.0's 1K) are never exposed.
+> OpenAI Compatible (relay) pickers are driven by the `openaiCompatSizes` setting, shaped as ratio → tier → pixels, e.g. `{ "16:9": { "2K": "2048x1152" } }`; an empty table keeps the legacy 1:1 / 3:2 / 2:3 + standard behavior.
 
 </details>
 

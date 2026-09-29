@@ -273,17 +273,24 @@ export class SubscriptionManager {
       // images go as typed image_url entries (JSON, not multipart).
       url = references.length > 0 ? GROK_IMAGE_EDIT_URL : GROK_IMAGE_URL
       headers = grokIdentityHeaders(session)
-      // Grok thinks in aspect ratios, not sizes; and has two quality tiers
-      // where high is composed from medium.
-      const aspect: Record<string, string> = { '1024x1024': '1:1', '1024x1536': '2:3', '1536x1024': '3:2', auto: 'auto' }
+      // Grok thinks in aspect ratios, not sizes. W:H strings (and 'auto')
+      // pass straight through; legacy pixel sizes from older callers map onto
+      // the nearest ratio. Quality tier '1k'/'2k' goes to `resolution`;
+      // low/medium/high stay on `quality` for backwards compatibility.
+      const legacyAspect: Record<string, string> = { '1024x1024': '1:1', '1024x1536': '2:3', '1536x1024': '3:2' }
+      const aspectRatio = options.size === undefined ? undefined
+        : options.size === 'auto' || /^\d+:\d+$/.test(options.size) ? options.size
+        : legacyAspect[options.size]
       const level = options.quality === 'low' ? 'low' : (options.quality === 'medium' || options.quality === 'high') ? 'medium' : undefined
+      const resolution = options.quality === '1k' || options.quality === '2k' ? options.quality : undefined
       body = {
         prompt: text,
         model: GROK_IMAGE_MODEL,
         response_format: 'b64_json',
         ...(references.length > 0 ? { images: references.map(image => ({ type: 'image_url', image_url: toDataUrl(image) })) } : {}),
-        ...(options.size !== undefined && aspect[options.size] !== undefined ? { aspect_ratio: aspect[options.size] } : {}),
+        ...(aspectRatio !== undefined ? { aspect_ratio: aspectRatio } : {}),
         ...(level !== undefined ? { quality: level } : {}),
+        ...(resolution !== undefined ? { resolution } : {}),
       }
     }
 
@@ -324,9 +331,11 @@ function antigravityAspectRatioOf(size: string | undefined): string | undefined 
     '1536x1024': '3:2',
     '768x1398': '9:16',
     '1398x768': '16:9',
-    auto: '1:1',
   }
   if (size === undefined) return undefined
+  // `auto` means the model picks; omitting imageConfig.aspectRatio entirely
+  // is the only way to express that, so no ratio is forwarded.
+  if (size === 'auto') return undefined
   const mapped = table[size]
   if (mapped !== undefined) return mapped
   // Already a ratio like 16:9 passes through; anything else falls back to 1:1.
