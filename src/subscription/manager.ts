@@ -175,7 +175,7 @@ export class SubscriptionManager {
         ? await antigravityExchangeCode(antigravityConfig(), row.pkce, code)
         : await grokExchangeCode(grokConfig(), row.pkce, code)
     await this.saveBlob(vendor, blob)
-    return `<!doctype html><meta charset="utf-8"><title>dsh-image-gen</title><p>${providerNameOf(vendor)} 登录成功（${escapeHtml(blob.email)}），可以关闭此页返回设置。</p>`
+    return `<!doctype html><meta charset="utf-8"><title>dsh-image-gen</title><p lang="zh-CN">${providerNameOf(vendor)} 登录成功（${escapeHtml(blob.email)}），可以关闭此页返回设置。</p><p lang="en">${providerNameOf(vendor)} sign-in successful (${escapeHtml(blob.email)}). You can close this page and return to settings.</p>`
   }
 
   /** Sign out: clear the blob and the caches. No other setting changes. */
