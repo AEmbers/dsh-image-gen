@@ -1,12 +1,12 @@
 /**
- * Google Antigravity (Nano Banana Pro) subscription image vendor.
+ * Google Antigravity (Nano Banana 2) subscription image vendor.
  *
  * Protocol adapted from opencode-antigravity-auth-remix (MIT,
  * (c) 2026 Darkstarrd-dev, based on NoeFabris/opencode-antigravity-auth):
  * Google OAuth with the Antigravity CLI's public client credentials, managed
  * project discovery via loadCodeAssist, and image generation through the
- * v1internal:streamGenerateContent endpoint with the gemini-3-pro-image
- * model. Reference: dist/src/constants.js, dist/src/plugin/image.js,
+ * v1internal:streamGenerateContent endpoint. Reference:
+ * dist/src/constants.js, dist/src/plugin/image.js,
  * dist/src/plugin/project.js.
  *
  * The dsh-subscriptions antigravity vendor left the OAuth client empty
@@ -17,6 +17,7 @@
 import { randomUUID } from 'node:crypto'
 import { buildAuthorizeUrl, formTokenRequest, type Pkce } from '../oauth.js'
 import type { SubscriptionBlob } from '../blob.js'
+import { DEFAULT_SUBSCRIPTION_MODELS } from '../../shared.js'
 
 const AUTH = 'https://accounts.google.com/o/oauth2/v2/auth'
 const TOKEN = 'https://oauth2.googleapis.com/token'
@@ -50,8 +51,8 @@ const LOAD_ENDPOINTS = [
   'https://autopush-cloudcode-pa.sandbox.googleapis.com',
 ] as const
 
-/** The image model served through this channel: Nano Banana Pro. */
-export const ANTIGRAVITY_IMAGE_MODEL = 'gemini-3-pro-image'
+/** The image model served through this channel: Nano Banana 2. */
+export const ANTIGRAVITY_IMAGE_MODEL = DEFAULT_SUBSCRIPTION_MODELS['google-sub']
 
 /**
  * Antigravity client version carried in the browser User-Agent. Google's
@@ -108,7 +109,7 @@ const DEFAULT_PROJECT_ID = 'rising-fact-p41fc'
 /** Generation timeout mirroring the reference implementation. */
 const IMAGE_TIMEOUT_MS = 120_000
 
-/** Aspect ratios the generationConfig.imageConfig accepts (gemini-3-pro-image). */
+/** Aspect ratios the generationConfig.imageConfig accepts (gemini-3.1-flash-image). */
 const ASPECT_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'] as const
 
 /** Safety settings the image endpoint requires to not block benign prompts. */

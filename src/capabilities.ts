@@ -20,7 +20,7 @@
  *   same size/quality request fields as the public Image API, but may return
  *   different effective dimensions/quality. Treat these options as requests.
  * - grok-sub (grok-imagine-image-2.0): aspect_ratio + resolution 1k/2k.
- * - google-sub (gemini-3-pro-image): 10 ratios + imageSize 1K/2K/4K (we expose
+ * - google-sub (gemini-3.1-flash-image): 10 ratios + imageSize 1K/2K/4K (we expose
  *   standard/HD → default/4K).
  */
 import type { CloudImageProvider, StudioOption, SubscriptionProvider } from './shared.js'

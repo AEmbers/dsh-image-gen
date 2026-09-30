@@ -302,7 +302,7 @@ pnpm dsh plugin --profile web add ./dsh-image-gen
 | Local ComfyUI      | 用户导入的 API Workflow      | `http://127.0.0.1:8188`                                         |
 | ChatGPT 订阅       | `gpt-image-2.5-flare`（通道固定） | 账号登录，无需配置                                        |
 | Grok 订阅         | `grok-imagine-image-2.0`（通道固定） | 账号登录，无需配置                                    |
-| Google 订阅       | `gemini-3-pro-image`（通道固定） | 账号登录，无需配置                                        |
+| Google 订阅       | `gemini-3.1-flash-image`（通道固定） | 账号登录，无需配置                                        |
 
 </details>
 

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SubscriptionManager, SUBSCRIPTION_MAX_REFERENCE_IMAGES, type SubscriptionVendor } from '../src/subscription/manager.js'
-import { antigravityImageBody } from '../src/subscription/vendors/antigravity.js'
+import { DEFAULT_SUBSCRIPTION_MODELS } from '../src/shared.js'
+import { antigravityEnvelope, antigravityImageBody } from '../src/subscription/vendors/antigravity.js'
 
 /**
  * Wire-protocol tests for subscription image editing. These pin the contract
@@ -173,5 +174,13 @@ describe('subscription manager edit wire protocol', () => {
   it('uses Gemini imageConfig for Google subscription ratio and HD', () => {
     const body = antigravityImageBody({ prompt: 'a portrait', aspectRatio: '9:16', hd: true })
     expect(body.generationConfig).toMatchObject({ imageConfig: { aspectRatio: '9:16', imageSize: '4K' } })
+  })
+
+  it('uses Gemini 3.1 Flash Image for the Google subscription profile and wire request', () => {
+    expect(DEFAULT_SUBSCRIPTION_MODELS['google-sub']).toBe('gemini-3.1-flash-image')
+    expect(antigravityEnvelope('account-project', antigravityImageBody({ prompt: 'a portrait' }))).toMatchObject({
+      project: 'account-project',
+      model: 'gemini-3.1-flash-image',
+    })
   })
 })

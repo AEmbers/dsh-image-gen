@@ -302,7 +302,7 @@ Bring private image generation on your local GPU directly into Agent conversatio
 | Local ComfyUI | Imported API Workflow | `http://127.0.0.1:8188` |
 | ChatGPT subscription | `gpt-image-2.5-flare` (channel-fixed) | Account sign-in, no configuration |
 | Grok subscription | `grok-imagine-image-2.0` (channel-fixed) | Account sign-in, no configuration |
-| Google subscription | `gemini-3-pro-image` (channel-fixed) | Account sign-in, no configuration |
+| Google subscription | `gemini-3.1-flash-image` (channel-fixed) | Account sign-in, no configuration |
 
 </details>
 
