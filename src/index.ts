@@ -70,7 +70,7 @@ interface SingleGenerationArgs {
 
 /** Ordered per-item outcomes for the generate_images batch tool. */
 interface BatchGeneratedValue {
-  images: { attachment: ImageAttachmentRef; provider: string; model: string; output: string; savedTo?: string; saveError?: string; prompt: string }[]
+  images: (GeneratedValue & { prompt: string })[]
   failures: { index: number; prompt: string; error: string }[]
 }
 
@@ -318,22 +318,27 @@ export function apply(ctx: Context, config: Config = {}): void {
         type: 'object', additionalProperties: false, properties: {
           images: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
             attachment: { type: 'object', required: true, additionalProperties: false, properties: {
-              attachmentId: { type: 'string', required: true }, mediaType: { type: 'string', required: true }, bytes: { type: 'integer', required: true }, width: { type: 'integer', required: true }, height: { type: 'integer', required: true }, name: { type: 'string' },
+              attachmentId: { type: 'string', required: true }, mediaType: { type: 'string', required: true }, bytes: { type: 'integer', required: true }, width: { type: 'integer', required: true }, height: { type: 'integer', required: true }, name: { type: 'string' }, originalDimensions: { type: 'object', additionalProperties: false, properties: { width: { type: 'integer', required: true }, height: { type: 'integer', required: true } } },
             } },
-            provider: { type: 'string', required: true }, model: { type: 'string', required: true }, output: { type: 'string', required: true }, savedTo: { type: 'string' }, saveError: { type: 'string' }, prompt: { type: 'string', required: true },
+            provider: { type: 'string', required: true }, model: { type: 'string', required: true }, output: { type: 'string', required: true }, savedTo: { type: 'string' }, saveError: { type: 'string' }, seed: { type: 'integer' }, prompt: { type: 'string', required: true },
           } } },
           failures: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
             index: { type: 'integer', required: true }, prompt: { type: 'string', required: true }, error: { type: 'string', required: true },
           } } },
         },
       },
-      render: (_args: unknown, value: BatchGeneratedValue) => [{
-        type: 'text' as const,
-        text: `Generated ${String(value.images.length)} of ${String(value.images.length + value.failures.length)} images.\n${[
-          ...value.images.map(image => `${String(image.prompt).slice(0, 80)} — attachment ${String(image.attachment.attachmentId)}${typeof image.savedTo === 'string' ? `, saved to ${image.savedTo}` : ''}`),
-          ...value.failures.map(failure => `${failure.prompt.slice(0, 80)} — failed: ${failure.error}`),
-        ].join('\n')}\nEach generated image is attached to the conversation; respond without reading or searching for them.`,
-      }],
+      render: (_args: unknown, value: BatchGeneratedValue) => [
+        {
+          type: 'text' as const,
+          text: `Generated ${String(value.images.length)} of ${String(value.images.length + value.failures.length)} images.\n${value.failures.map(failure => `${failure.prompt.slice(0, 80)} — failed: ${failure.error}`).join('\n')}`,
+        },
+        ...value.images.flatMap(image => imageOutput('Generated').render({}, image).map(block =>
+          block.type === 'text' ? { ...block, text: `${block.text}\nImage prompt: ${image.prompt}` } : block)),
+      ],
+      presentationMeta: (_args: unknown, value: BatchGeneratedValue) => ({
+        kind: 'dsh-image-gen-batch',
+        images: value.images.map(image => imageOutput('Generated').presentationMeta({ prompt: image.prompt }, image)),
+      }),
     },
     async execute(args, exec): Promise<BatchGeneratedValue> {
       if (args.prompts.length === 0) throw new Error('generate_images requires at least one prompt')
@@ -355,18 +360,14 @@ export function apply(ctx: Context, config: Config = {}): void {
             ...(args.size !== undefined ? { size: args.size } : {}),
             ...(args.workflow !== undefined ? { workflow: args.workflow } : {}),
           }, exec)
-          images.push({
-            attachment: value.attachment, provider: value.provider, model: value.model, output: value.output,
-            ...(typeof value.savedTo === 'string' ? { savedTo: value.savedTo } : {}),
-            ...(typeof value.saveError === 'string' ? { saveError: value.saveError } : {}),
-            prompt,
-          })
+          images.push({ ...value, prompt })
         } catch (error) {
           failures.push({ index, prompt, error: error instanceof Error ? error.message : String(error) })
         }
       }
       return { images, failures }
     },
+    presentResult: (_args, result) => imagePresentation(result),
   }))
 
   ctx.tools.register(defineTool({
@@ -581,6 +582,15 @@ async function saveGenerated(
 }
 
 function imagePresentation(result: ToolResult) {
+  const meta = result.meta
+  if (typeof meta === 'object' && meta !== null && !Array.isArray(meta)
+    && meta.kind === 'dsh-image-gen-batch' && Array.isArray(meta.images)) {
+    const content = meta.images.flatMap(image => {
+      const attachment = imageAttachmentFromMeta(image)
+      return attachment === undefined ? [] : [{ type: 'image' as const, attachment }]
+    })
+    return content.length === 0 ? undefined : { card: 'generic' as const, title: 'Generated images', content }
+  }
   const attachment = imageAttachmentFromMeta(result.meta)
   return attachment === undefined ? undefined : { card: 'generic' as const, title: 'Generated image', content: [{ type: 'image' as const, attachment }] }
 }

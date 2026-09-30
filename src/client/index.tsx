@@ -59,6 +59,7 @@ import { INSPIRATION_STYLE } from './inspiration-style.js'
 import {
   IMAGE_RESULT_NODE_KIND,
   createImageResultDefinition,
+  imageResultsFromMeta,
   type ImageResultPresentation,
 } from './image-result-node.js'
 import {
@@ -807,20 +808,6 @@ export function apply(ctx: Context): void {
   const scope = configForms?.get<ImageSettings>(IMAGE_GENERATION_ENTRY_ID)
     ?? settingsScopeApi?.bind<ImageSettings>({ namespace: IMAGE_GENERATION_NAMESPACE })
     ?? degradedScope<ImageSettings>()
-  // Host-owned chat transcript preference ("ui-chat"), read through the same
-  // generation's reader: 0.1.7 via the form id, older hosts via the namespace.
-  const chatScope = configForms?.get<{ transcriptView?: string }>('ui-chat')
-    ?? settingsScopeApi?.bind<{ transcriptView?: string }>({ namespace: 'ui-chat' })
-    ?? degradedScope<{ transcriptView?: string }>()
-  // 0.1.7 renamed the modes to compact/standard/detailed/verbose (legacy
-  // `normal` maps to `standard`). Unknown or unloaded modes use Compact-safe
-  // anchoring; legacy hosts know just normal/compact.
-  const isCompactTranscript = (): boolean => {
-    const mode = chatScope.getSnapshot().value?.transcriptView
-    return configForms === undefined
-      ? mode !== 'normal'
-      : mode !== 'standard' && mode !== 'detailed' && mode !== 'verbose'
-  }
   const locale = ctx.get('locale') as LocaleService | undefined
   const promotion = { enabled: false }
 
@@ -864,7 +851,7 @@ export function apply(ctx: Context): void {
       promotion.enabled = true
       const ownerRegister = owner.slots.register.bind(owner.slots) as unknown as (options: object, component: unknown) => () => void
       owner.effect(
-      () => uiConversation.events.register(createImageResultDefinition({ isCompactTranscript })),
+      () => uiConversation.events.register(createImageResultDefinition()),
       'dsh-image-gen: promoted image result node',
       )
       ;(owner.slots.inject as any)('conversation.chat.node', () => ownerRegister({
@@ -977,6 +964,11 @@ export function apply(ctx: Context): void {
     key: 'generate_image',
     inject: (): ImageCardFace => ({ locale, promoted: promotion.enabled }),
   }, GeneratedImageCard))
+  ctx.slots.inject('tool.call.toolview', () => register({
+    name: 'tool.call.toolview',
+    key: 'generate_images',
+    inject: (): ImageCardFace => ({ locale, promoted: promotion.enabled }),
+  }, GeneratedImagesCard))
   ctx.slots.inject('tool.call.toolview', () => register({
     name: 'tool.call.toolview',
     key: 'edit_image',
@@ -2111,11 +2103,37 @@ export function GeneratedImageCard(props: ImageCardProps) {
   return <ImageResultCard result={result} locale={props.locale} sessionId={(props as any).sessionId} />
 }
 
+/** Suppress the folded duplicate on modern hosts; render every image on legacy hosts. */
+export function GeneratedImagesCard(props: ImageCardProps) {
+  const block = props.block as unknown as {
+    kind?: string
+    meta?: unknown
+    resultView?: { card?: string; meta?: unknown; content?: Array<{ type: string; text?: string; attachment?: ImageResultPresentation['attachment'] }> }
+    content?: Array<{ type: string; text?: string; attachment?: ImageResultPresentation['attachment'] }>
+  }
+  let results = imageResultsFromMeta(block.meta ?? block.resultView?.meta)
+  if (results.length === 0 && 'kind' in block) {
+    const content = block.resultView?.card === 'generic' ? block.resultView.content : block.content
+    results = (content ?? []).flatMap(item => item.type === 'image' && item.attachment !== undefined
+      ? [{ attachment: item.attachment, prompt: 'Generated Image', provider: '', model: '', output: '' }]
+      : [])
+  }
+  if (props.promoted && results.length > 0) return <PromotedResultNotice locale={props.locale} />
+  if (results.length === 0) {
+    if (!('kind' in block)) return <ImageResultCard locale={props.locale} />
+    const content = block.content ?? block.resultView?.content ?? []
+    return <div>{content.filter(item => item.type === 'text').map((item, index) => <p key={index}>{item.text}</p>)}</div>
+  }
+  return <div className="dsh-ig-promoted-results">
+    {results.map((result, index) => <ImageResultCard key={`${result.attachment.attachmentId}:${index}`} result={result} locale={props.locale} sessionId={(props as any).sessionId} />)}
+  </div>
+}
+
 /** Render modern image artifacts as final conversation output instead of Tool process content. */
 export function PromotedImageResultNode(props: ImageResultNodeProps) {
   return <div className="dsh-ig-promoted-results">
-    {props.node.data.results.map(result =>
-      <ImageResultCard key={result.attachment.attachmentId} result={result} locale={props.locale} sessionId={(props as any).sessionId} />)}
+    {props.node.data.results.map((result, index) =>
+      <ImageResultCard key={`${result.attachment.attachmentId}:${index}`} result={result} locale={props.locale} sessionId={(props as any).sessionId} />)}
   </div>
 }
 

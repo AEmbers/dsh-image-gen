@@ -1,4 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import * as plugin from '../src/client/index.js'
@@ -25,6 +27,7 @@ function clientHarness(options: {
   remote: object
   remoteCredentials?: unknown
   uiConversation?: unknown
+  transcriptView?: string
   /** Settings service generation the host ships; DSH 0.1.7+: configForms, 0.1.5/0.1.6: settingsScope. */
   settingsGeneration?: 'configForms' | 'settingsScope' | 'none'
 }): ClientHarness {
@@ -67,7 +70,11 @@ function clientHarness(options: {
   const generation = options.settingsGeneration ?? 'configForms'
   if (generation === 'configForms') {
     ctx.provide('configForms', {
-      get: vi.fn(() => ({ getSnapshot: vi.fn(() => ({ value: undefined })), subscribe: vi.fn(), set: vi.fn() })),
+      get: vi.fn((id: string) => ({
+        getSnapshot: vi.fn(() => ({ value: id === 'ui-chat' && options.transcriptView !== undefined
+          ? { transcriptView: options.transcriptView } : undefined })),
+        subscribe: vi.fn(), set: vi.fn(),
+      })),
     })
   } else if (generation === 'settingsScope') {
     ctx.provide('settingsScope', { bind: legacyBind })
@@ -79,6 +86,26 @@ function clientHarness(options: {
 afterEach(() => { vi.unstubAllGlobals() })
 
 describe('DSH client compatibility', () => {
+  it('renders every legacy batch image and suppresses duplicate tool cards after promotion', () => {
+    const meta = { kind: 'dsh-image-gen-batch', images: ['first', 'second'].map(name => ({
+      kind: 'dsh-image-gen',
+      attachment: { attachmentId: `sha256:${name}`, mediaType: 'image/png', bytes: 12, width: 32, height: 24 },
+      prompt: name, provider: 'google', model: 'gemini', output: '2:3',
+    })) }
+    const block = { kind: 'tool-result', meta }
+    const legacy = renderToStaticMarkup(createElement(plugin.GeneratedImagesCard, { block, promoted: false } as never))
+    expect(legacy.match(/<section class="dsh-ig-result"/g)).toHaveLength(2)
+    const promoted = renderToStaticMarkup(createElement(plugin.GeneratedImagesCard, { block, promoted: true } as never))
+    expect(promoted).not.toContain('<section')
+  })
+
+  it('shows a completed batch failure instead of an endless image loader', () => {
+    const block = { kind: 'tool-result', content: [{ type: 'text', text: 'Generated 0 of 1 images. failed: quota' }] }
+    const rendered = renderToStaticMarkup(createElement(plugin.GeneratedImagesCard, { block, promoted: true } as never))
+    expect(rendered).toContain('failed: quota')
+    expect(rendered).not.toContain('dsh-ig-loading')
+  })
+
   it('activates on npm DSH 0.1.1-rc.2 and adapts connection credentials', async () => {
     const describeCredential = vi.fn(async () => ({
       result: { ok: true, value: { credentials: { GEMINI_API_KEY: { configured: true } } } },
@@ -121,11 +148,11 @@ describe('DSH client compatibility', () => {
     const fiber = harness.ctx.plugin(plugin)
     await fiber.await()
 
-    // DSH 0.1.5/0.1.6: no configForms service exists, so the plugin must probe
-    // settingsScope and bind both namespaces through it (issue #55 in reverse).
+    // DSH 0.1.5/0.1.6: no configForms service exists, so plugin settings
+    // still bind through settingsScope. Image placement no longer reads ui-chat.
     expect(fiber.state).toBe(2)
     expect(harness.legacyBind).toHaveBeenCalledWith({ namespace: 'image-generation' })
-    expect(harness.legacyBind).toHaveBeenCalledWith({ namespace: 'ui-chat' })
+    expect(harness.legacyBind).not.toHaveBeenCalledWith({ namespace: 'ui-chat' })
     const injectSettingsCard = harness.registrations.get('settings.plugins.tab')
     expect(() => injectSettingsCard?.()).not.toThrow()
 
@@ -193,12 +220,11 @@ describe('DSH client compatibility', () => {
     const definition = registerEvent.mock.calls[0]?.[0] as {
       buildViewNode(context: unknown): { anchorSeq: number } | null
     }
-    // The ui-chat form has not loaded in this harness. Keep a finished image
-    // beside the answer until its transcript mode is known.
+    // Image results keep their own event position without reading ui-chat.
     expect(definition.buildViewNode({
       key: 'image:1', id: '1', matches: [],
-      state: { results: [{ seq: 4 }], answerSeq: 7, endSeq: 8 },
-    })).toMatchObject({ anchorSeq: 7 })
+      state: { results: [{ seq: 4 }] },
+    })).toMatchObject({ anchorSeq: 4, location: { kind: 'session' } })
     expect(harness.slotInjections.some(injection => injection.name === 'conversation.chat.node')).toBe(true)
 
     for (const injection of harness.slotInjections.filter(candidate => candidate.name === 'tool.call.toolview')) {
@@ -206,10 +232,37 @@ describe('DSH client compatibility', () => {
     }
     const toolRegistrations = harness.slotRegistrations.filter(({ options }) =>
       options.name === 'tool.call.toolview')
-    expect(toolRegistrations).toHaveLength(2)
+    expect(toolRegistrations.map(({ options }) => options.key)).toEqual(['generate_image', 'generate_images', 'edit_image'])
     for (const { options } of toolRegistrations) {
       expect((options.inject as () => unknown)()).toMatchObject({ promoted: true })
     }
+
+    await fiber.dispose()
+  })
+
+  it.each([
+    ['compact', 4],
+    ['standard', 4],
+    ['detailed', 4],
+    ['verbose', 4],
+  ] as const)('keeps image results outside process folding in %s mode', async (transcriptView, anchorSeq) => {
+    const registerEvent = vi.fn((_definition: unknown) => vi.fn())
+    const harness = clientHarness({
+      connection: {},
+      remote: { credentials: { describe: vi.fn(), set: vi.fn() } },
+      uiConversation: { events: { register: registerEvent } },
+      transcriptView,
+    })
+    const fiber = harness.ctx.plugin(plugin)
+    await fiber.await()
+
+    const definition = registerEvent.mock.calls[0]?.[0] as {
+      buildViewNode(context: unknown): { anchorSeq: number; location: unknown } | null
+    }
+    expect(definition.buildViewNode({
+      key: 'image:1', id: '1', matches: [],
+      state: { results: [{ seq: 4 }] },
+    })).toMatchObject({ anchorSeq, location: { kind: 'session' } })
 
     await fiber.dispose()
   })
