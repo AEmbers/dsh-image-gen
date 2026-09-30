@@ -57,7 +57,7 @@ export async function generateOpenAICompatibleImage(input: {
 }
 
 /** How the edits endpoint expects its request body (#41). */
-export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages'
+export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'xaiJson'
 
 export async function editOpenAICompatibleImage(input: {
   apiKey: string
@@ -90,6 +90,21 @@ export async function editOpenAICompatibleImage(input: {
    */
   extraBody?: Readonly<Record<string, unknown>>
 }): Promise<GeneratedCompatibleImage> {
+  if (input.editFormat === 'xaiJson') {
+    const references = input.sourceImages.map(image => ({ type: 'image_url', url: toDataUrl(image) }))
+    const response = await fetch(imageEndpoint(input.baseURL, 'edits'), {
+      method: 'POST', redirect: 'error', signal: input.signal,
+      headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: input.model,
+        prompt: input.prompt,
+        ...(references.length === 1 ? { image: references[0] } : { images: references }),
+        ...(input.quality === undefined ? {} : { quality: input.quality }),
+        ...(input.extraBody ?? {}),
+      }),
+    })
+    return parseImageResponse(response, 'xai', input)
+  }
   if (input.editFormat === 'jsonImageUrlArray') {
     const body = {
       model: input.model,

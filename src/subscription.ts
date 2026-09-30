@@ -4,7 +4,7 @@
  * Login (PKCE loopback), token storage through the DSH Credentials service,
  * refresh and the wire calls all live in `./subscription/` — adapted from
  * @goodandready/dsh-subscriptions (MIT, (c) 2026 GooDAnDReaDY), trimmed to
- * the two image vendors this bundle ships. This file keeps the same
+ * the image subscription vendors this bundle ships. This file keeps the same
  * `{ data, mediaType }` contract as the API-key adapters so `saveGenerated`
  * and everything downstream is shared.
  *
@@ -17,10 +17,27 @@ import type { ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { detectImageMediaType } from './reference-image.js'
 import { SubscriptionManager, vendorOf } from './subscription/manager.js'
 import { SUBSCRIPTION_TIMEOUT_MS, type SubscriptionProvider } from './shared.js'
+import { SUBSCRIPTION_CAPABILITIES } from './capabilities.js'
 
 export { SubscriptionManager, vendorOf } from './subscription/manager.js'
 export { registerSubscriptionRoutes } from './subscription/subscription-route.js'
 export { SUBSCRIPTION_TIMEOUT_MS } from './shared.js'
+
+/** Translate image tool options into each subscription channel's wire inputs. */
+export function subscriptionToolParameters(provider: SubscriptionProvider, options: { size?: string; aspectRatio?: string; imageSize?: string }): { size?: string; quality?: string } {
+  if (options.size !== undefined && options.aspectRatio !== undefined) throw new Error('size 与 aspect_ratio 请只选一个')
+  const ratio = options.aspectRatio
+  if (ratio !== undefined && !SUBSCRIPTION_CAPABILITIES[provider].ratioOptions.some(option => option.value === ratio)) throw new Error(`${provider} 不支持比例 ${ratio}`)
+  const size = options.size ?? (ratio === undefined ? undefined : provider === 'chatgpt-sub' ? SUBSCRIPTION_CAPABILITIES[provider].sizeFor?.(ratio, 'auto') : ratio)
+  let quality: string | undefined
+  if (options.imageSize !== undefined) {
+    if (provider === 'grok-sub' && (options.imageSize === '1K' || options.imageSize === '2K')) quality = options.imageSize.toLowerCase()
+    else if (provider === 'google-sub' && options.imageSize === '4K') quality = 'hd'
+    else if (provider === 'google-sub' && options.imageSize === '1K') quality = undefined
+    else throw new Error(`${provider} 不支持清晰度 ${options.imageSize}`)
+  }
+  return { ...(size === undefined ? {} : { size }), ...(quality === undefined ? {} : { quality }) }
+}
 
 /**
  * Generate one image through a logged-in subscription account. Returns the
@@ -37,15 +54,17 @@ export async function generateSubscriptionImage(options: {
   sourceImages?: ReadonlyArray<{ data: Uint8Array; mediaType: ImageMediaType }>
   maxBytes: number
   signal: AbortSignal
-}): Promise<{ data: Uint8Array; mediaType: ImageMediaType; revisedPrompt?: string }> {
+}): Promise<{ data: Uint8Array; mediaType: ImageMediaType; revisedPrompt?: string; reportedQuality?: string }> {
   const { manager, provider, prompt, maxBytes, signal } = options
   const size = options.size?.trim()
+  const quality = options.quality?.trim()
   const sourceImages = options.sourceImages ?? []
   const result = await withTimeout(
     manager.generate({
       vendor: vendorOf(provider),
       prompt,
       ...(size !== undefined && size.length > 0 ? { size } : {}),
+      ...(quality !== undefined && quality.length > 0 ? { quality } : {}),
       ...(sourceImages.length > 0 ? { referenceImages: sourceImages } : {}),
       signal,
     }),
@@ -67,6 +86,7 @@ export async function generateSubscriptionImage(options: {
     data: bytes,
     mediaType,
     ...(typeof first.revisedPrompt === 'string' && first.revisedPrompt.length > 0 ? { revisedPrompt: first.revisedPrompt } : {}),
+    ...(typeof first.reportedQuality === 'string' && first.reportedQuality.length > 0 ? { reportedQuality: first.reportedQuality } : {}),
   }
 }
 

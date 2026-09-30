@@ -16,8 +16,9 @@
  *   values incl. auto) + resolution 1k/2k.
  * - zhipu (glm-image): 7 recommended sizes (32-divisible, ≤2^22 px); quality
  *   hd only (standard exists on cogview-4, hd works on both).
- * - chatgpt-sub (gpt-image-2.5-flare): same free-size contract as gpt-image-2
- *   plus xhigh/max quality tiers.
+ * - chatgpt-sub (gpt-image-2.5-flare): the private Codex route accepts the
+ *   same size/quality request fields as the public Image API, but may return
+ *   different effective dimensions/quality. Treat these options as requests.
  * - grok-sub (grok-imagine-image-2.0): aspect_ratio + resolution 1k/2k.
  * - google-sub (gemini-3-pro-image): 10 ratios + imageSize 1K/2K/4K (we expose
  *   standard/HD → default/4K).

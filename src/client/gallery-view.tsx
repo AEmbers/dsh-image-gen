@@ -320,6 +320,18 @@ function formatRelativeTime(
 
 /** Extract standard aspect ratio for precise filtering */
 function getItemRatio(item: GalleryItem): string {
+  // Codex subscription may ignore its requested ratio. Filter these cards by
+  // the saved image's dimensions instead of the Studio selection.
+  if (item.provider === 'chatgpt-sub' && item.attachment.width && item.attachment.height) {
+    const actual = item.attachment.width / item.attachment.height
+    for (const [label, value] of [
+      ['1:1', 1], ['16:9', 16 / 9], ['9:16', 9 / 16],
+      ['4:3', 4 / 3], ['3:4', 3 / 4], ['3:2', 3 / 2], ['2:3', 2 / 3],
+    ] as const) {
+      if (Math.abs(actual / value - 1) < 0.08) return label
+    }
+    return 'custom'
+  }
   if (item.aspectRatio && item.aspectRatio !== 'custom') {
     return item.aspectRatio
   }

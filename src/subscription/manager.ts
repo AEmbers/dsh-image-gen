@@ -5,7 +5,7 @@
  *
  * The account store pattern follows @goodandready/dsh-subscriptions (MIT,
  * (c) 2026 GooDAnDReaDY) lib/accounts.js, trimmed to one account per vendor
- * (no rotation, no cooldowns) because this bundle has exactly two vendors
+ * (no rotation, no cooldowns) because this bundle has one account per vendor
  * and no chat adapter to protect.
  *
  * Isolation invariants (project rules):
@@ -52,6 +52,7 @@ import {
   antigravityResolveProject,
 } from './vendors/antigravity.js'
 import { SUBSCRIPTION_PROVIDER_DISPLAY_NAMES, type SubscriptionProvider } from '../shared.js'
+import { xaiToolParameters } from '../xai-params.js'
 
 /** Vendor ids used by the credential refs and the wire calls. */
 export type SubscriptionVendor = 'codex' | 'grok' | 'antigravity'
@@ -226,7 +227,7 @@ export class SubscriptionManager {
     quality?: string
     referenceImages?: ReadonlyArray<SubscriptionReferenceImage>
     signal?: AbortSignal
-  }): Promise<Array<{ b64_json: string; revisedPrompt?: string }>> {
+  }): Promise<Array<{ b64_json: string; revisedPrompt?: string; reportedQuality?: string }>> {
     const { vendor, prompt } = options
     const session = await this.ensureFresh(vendor)
     const text = prompt.trim()
@@ -262,7 +263,7 @@ export class SubscriptionManager {
       url = references.length > 0 ? CODEX_IMAGE_EDIT_URL : CODEX_IMAGE_URL
       headers = codexIdentityHeaders(session)
       body = {
-        prompt: text,
+        prompt: codexPromptWithSize(text, options.size),
         model: CODEX_IMAGE_MODEL,
         ...(references.length > 0 ? { images: references.map(image => ({ image_url: toDataUrl(image) })) } : {}),
         ...(options.size !== undefined && options.size.length > 0 ? { size: options.size } : {}),
@@ -273,24 +274,23 @@ export class SubscriptionManager {
       // images go as typed image_url entries (JSON, not multipart).
       url = references.length > 0 ? GROK_IMAGE_EDIT_URL : GROK_IMAGE_URL
       headers = grokIdentityHeaders(session)
-      // Grok thinks in aspect ratios, not sizes. W:H strings (and 'auto')
-      // pass straight through; legacy pixel sizes from older callers map onto
-      // the nearest ratio. Quality tier '1k'/'2k' goes to `resolution`;
+      // Grok thinks in aspect ratios, not sizes. W:H strings pass through;
+      // legacy pixel sizes map to their exact supported ratio. Unsupported
+      // sizes fail explicitly. Quality tier '1k'/'2k' goes to `resolution`;
       // low/medium/high stay on `quality` for backwards compatibility.
-      const legacyAspect: Record<string, string> = { '1024x1024': '1:1', '1024x1536': '2:3', '1536x1024': '3:2' }
-      const aspectRatio = options.size === undefined ? undefined
-        : options.size === 'auto' || /^\d+:\d+$/.test(options.size) ? options.size
-        : legacyAspect[options.size]
+      const xaiParams = xaiToolParameters({
+        ...(options.size === undefined ? {} : options.size === 'auto' || options.size.includes(':') ? { aspectRatio: options.size } : { size: options.size }),
+        ...(options.quality === '1k' || options.quality === '2k' ? { imageSize: options.quality } : {}),
+      })
       const level = options.quality === 'low' ? 'low' : (options.quality === 'medium' || options.quality === 'high') ? 'medium' : undefined
-      const resolution = options.quality === '1k' || options.quality === '2k' ? options.quality : undefined
       body = {
         prompt: text,
         model: GROK_IMAGE_MODEL,
         response_format: 'b64_json',
-        ...(references.length > 0 ? { images: references.map(image => ({ type: 'image_url', image_url: toDataUrl(image) })) } : {}),
-        ...(aspectRatio !== undefined ? { aspect_ratio: aspectRatio } : {}),
+        ...(references.length === 1 ? { image: { type: 'image_url', url: toDataUrl(references[0]!) } }
+          : references.length > 1 ? { images: references.map(image => ({ type: 'image_url', url: toDataUrl(image) })) } : {}),
+        ...xaiParams,
         ...(level !== undefined ? { quality: level } : {}),
-        ...(resolution !== undefined ? { resolution } : {}),
       }
     }
 
@@ -323,6 +323,27 @@ export class SubscriptionManager {
   }
 }
 
+/** The private Codex backend can ignore size while following a canvas ratio in
+ * the prompt (live checks: 16:9 -> 1672x941, 9:16 -> 941x1672). Keep size too;
+ * this is best-effort composition guidance, not an exact-pixel guarantee. */
+function codexPromptWithSize(prompt: string, size: string | undefined): string {
+  const dimensions = /^(\d+)x(\d+)$/.exec(size ?? '')
+  if (dimensions === null) return prompt
+  const width = Number(dimensions[1])
+  const height = Number(dimensions[2])
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) return prompt
+  let divisor = width
+  let remainder = height
+  while (remainder !== 0) {
+    const next = divisor % remainder
+    divisor = remainder
+    remainder = next
+  }
+  const ratio = `${String(width / divisor)}:${String(height / divisor)}`
+  const orientation = width > height ? '横向宽屏' : width < height ? '竖向' : '正方形'
+  return `${prompt}\n\n输出图片的画布宽高比必须为${ratio}，${orientation}构图，完整画面铺满${orientation}画布。`
+}
+
 /** Map an OpenAI-style size onto the aspect ratio Antigravity accepts. */
 function antigravityAspectRatioOf(size: string | undefined): string | undefined {
   const table: Record<string, string> = {
@@ -347,11 +368,12 @@ function toDataUrl(image: SubscriptionReferenceImage): string {
   return `data:${image.mediaType};base64,${Buffer.from(image.data).toString('base64')}`
 }
 
-/** Response parsing: both vendors reply in the same `{data:[{b64_json}]}` shape. */
-function parseImages(payload: unknown): Array<{ b64_json: string; revisedPrompt?: string }> {
+/** Response parsing: Codex and Grok reply in the same `{data:[{b64_json}]}` shape. */
+function parseImages(payload: unknown): Array<{ b64_json: string; revisedPrompt?: string; reportedQuality?: string }> {
   const body = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : {}
   const rows = Array.isArray(body.data) ? body.data : []
-  const images: Array<{ b64_json: string; revisedPrompt?: string }> = []
+  const images: Array<{ b64_json: string; revisedPrompt?: string; reportedQuality?: string }> = []
+  const reportedQuality = typeof body.quality === 'string' && body.quality.length > 0 ? body.quality : undefined
   for (const row of rows) {
     if (typeof row !== 'object' || row === null) continue
     const b64 = (row as Record<string, unknown>).b64_json
@@ -360,6 +382,7 @@ function parseImages(payload: unknown): Array<{ b64_json: string; revisedPrompt?
     images.push({
       b64_json: b64,
       ...(typeof revised === 'string' && revised.length > 0 ? { revisedPrompt: revised } : {}),
+      ...(reportedQuality !== undefined ? { reportedQuality } : {}),
     })
   }
   if (images.length === 0) throw new Error('response contains no images')

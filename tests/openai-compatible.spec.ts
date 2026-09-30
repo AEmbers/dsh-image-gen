@@ -56,6 +56,32 @@ describe('OpenAI-compatible images', () => {
     expect(form.getAll('image[]')).toHaveLength(0)
   })
 
+  it.each([1, 2])('sends xAI edit with %i reference image(s) as JSON', async count => {
+    const encoded = Buffer.from('edited image').toString('base64')
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: [{ b64_json: encoded }] }), { headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const sourceImages = Array.from({ length: count }, (_, i) => ({ data: new Uint8Array([i + 1]), mediaType: 'image/png' as const }))
+    await editOpenAICompatibleImage({
+      apiKey: 'key', baseURL: 'https://api.x.ai/v1', model: 'grok-imagine-image-2.0', prompt: 'edit', sourceImages,
+      maxBytes: 1024, signal, editFormat: 'xaiJson', extraBody: { aspect_ratio: '9:16', resolution: '2k' },
+    })
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://api.x.ai/v1/images/edits')
+    expect(init.headers).toMatchObject({ authorization: 'Bearer key', 'content-type': 'application/json' })
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>
+    expect(body.aspect_ratio).toBe('9:16')
+    expect(body.resolution).toBe('2k')
+    expect(body.size).toBeUndefined()
+    const expected = sourceImages.map(image => ({ type: 'image_url', url: `data:image/png;base64,${Buffer.from(image.data).toString('base64')}` }))
+    if (count === 1) {
+      expect(body.image).toEqual(expected[0])
+      expect(body.images).toBeUndefined()
+    } else {
+      expect(body.images).toEqual(expected)
+      expect(body.image).toBeUndefined()
+    }
+  })
+
   it('downloads Ark URL output with its declared media type', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ url: 'https://image.example/result' }] }), { headers: { 'content-type': 'application/json' } }))

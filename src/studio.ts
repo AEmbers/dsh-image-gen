@@ -257,7 +257,7 @@ export async function generateFromStudio(
         : undefined
       const extraBody = p === 'xai' ? { aspect_ratio: input.ratio, resolution: input.quality } : undefined
       generated = input.mode === 'edit'
-        ? await editOpenAICompatibleImage({ apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, sourceImages, ...(size === undefined ? {} : { size }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, ...(quality === undefined ? {} : { quality }), ...(extraBody === undefined ? {} : { extraBody }), ...(p === 'openai-compat' ? { editFormat: wired.editFormat, editExtra: wired.editExtra } : {}) })
+        ? await editOpenAICompatibleImage({ apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, sourceImages, ...(size === undefined ? {} : { size }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, ...(quality === undefined ? {} : { quality }), ...(extraBody === undefined ? {} : { extraBody }), ...(p === 'openai-compat' ? { editFormat: wired.editFormat, editExtra: wired.editExtra } : p === 'xai' ? { editFormat: 'xaiJson' as const } : {}) })
         : await generateOpenAICompatibleImage({ provider: p, apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, ...(size === undefined ? {} : { size }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, ...(quality === undefined ? {} : { quality }), ...(extraBody === undefined ? {} : { extraBody }) })
       output = size ?? `${input.ratio}, ${input.quality}`
     } else if (wired.provider === 'seedream') {
@@ -408,7 +408,7 @@ async function generateSubscriptionFromStudio(
   const subCap = SUBSCRIPTION_CAPABILITIES[provider]
   const wireSize = provider === 'chatgpt-sub' ? subCap.sizeFor?.(input.ratio, input.quality) : input.ratio
   const wireQuality = input.quality === 'auto' || input.quality === 'standard' ? undefined : input.quality
-  const output = input.ratio === 'auto' && wireQuality === undefined
+  const requestedOutput = input.ratio === 'auto' && wireQuality === undefined
     ? '通道默认'
     : `${input.ratio}, ${input.quality}`
   const generateSingle = async (index: number): Promise<StudioGeneratedItem> => {
@@ -432,7 +432,7 @@ async function generateSubscriptionFromStudio(
     })
     return {
       attachment,
-      output,
+      output: subscriptionOutput(input.ratio, input.quality, requestedOutput, attachment.width, attachment.height, generated.reportedQuality),
     }
   }
   if (count === 1) {
@@ -453,6 +453,18 @@ async function generateSubscriptionFromStudio(
   }
   const first = successes[0]!
   return subscriptionResponse(input, startedAt, count, errors.length, successes, first, errors)
+}
+
+/** Describe what the subscription returned without presenting requested settings as actual output. */
+function subscriptionOutput(ratio: string, quality: string, fallback: string, width: number | undefined, height: number | undefined, reportedQuality?: string): string {
+  const qualityReport = reportedQuality === undefined ? '' : ` · 服务端回报清晰度 ${reportedQuality}`
+  if (width === undefined || height === undefined || width <= 0 || height <= 0) return `${fallback}${qualityReport}`
+  const actual = `实际 ${String(width)}×${String(height)}`
+  if (ratio === 'auto') return `请求 ${ratio}, ${quality}${qualityReport} · ${actual}`
+  const parts = ratio.split(':').map(Number)
+  const requested = (parts.length === 2 && parts[0]! > 0 && parts[1]! > 0) ? parts[0]! / parts[1]! : undefined
+  const mismatch = requested !== undefined && Math.abs((width / height) / requested - 1) > 0.12
+  return `请求 ${ratio}, ${quality}${qualityReport} · ${actual}${mismatch ? '（比例未生效）' : ''}`
 }
 
 /** Assemble the subscription workbench response with exactOptionalPropertyTypes-safe spreads. */

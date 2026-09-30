@@ -262,6 +262,38 @@ describe('subscription workbench profiles', () => {
 })
 
 describe('subscription workbench generation', () => {
+  it('forwards selected subscription ratio and quality through the shared wrapper', async () => {
+    for (const [provider, vendor, ratio, quality, size] of [
+      ['chatgpt-sub', 'codex', '9:16', 'high', '864x1536'],
+      ['grok-sub', 'grok', '9:16', '2k', '9:16'],
+      ['google-sub', 'antigravity', '9:16', 'hd', '9:16'],
+    ] as const) {
+      const manager = stubSubscriptionManager({ [provider]: { state: 'logged-in', email: 'user@example.com' } })
+      await generateFromStudio(studioCtx(), {}, {
+        mode: 'generate', provider, model: DEFAULT_SUBSCRIPTION_MODELS[provider],
+        prompt: 'a warm editorial portrait', ratio, quality,
+      }, new AbortController().signal, undefined, manager)
+      expect(manager.generateCalls).toEqual([{ vendor, prompt: 'a warm editorial portrait', size, quality }])
+    }
+  })
+
+  it('reports actual attachment dimensions when the subscription returns a square image for 9:16', async () => {
+    const manager = stubSubscriptionManager({ 'chatgpt-sub': { state: 'logged-in', email: 'user@example.com' } })
+    vi.spyOn(manager, 'generate').mockResolvedValueOnce([{ b64_json: TINY_PNG, reportedQuality: 'medium' }])
+    const ctx = studioCtx()
+    ctx.attachments.saveImage.mockImplementation(async ({ mediaType }: { mediaType: string }) => ({
+      attachmentId: 'att-square', mediaType, bytes: 100, width: 1254, height: 1254,
+    }))
+    const result = await generateFromStudio(ctx, {}, {
+      mode: 'generate', provider: 'chatgpt-sub', model: DEFAULT_SUBSCRIPTION_MODELS['chatgpt-sub'],
+      prompt: 'a warm editorial portrait', ratio: '9:16', quality: 'high',
+    }, new AbortController().signal, undefined, manager)
+    expect(result.output).toContain('请求 9:16, high')
+    expect(result.output).toContain('实际 1254×1254')
+    expect(result.output).toContain('服务端回报清晰度 medium')
+    expect(result.output).toContain('比例未生效')
+  })
+
   it('routes prompt-only subscription requests through generateSubscriptionImage', async () => {
     const manager = stubSubscriptionManager({ 'chatgpt-sub': { state: 'logged-in', email: 'user@example.com' } })
     const ctx = studioCtx()
@@ -1016,7 +1048,7 @@ function studioCtx(): any {
 let saveImageSeq = 0
 
 interface StubSubscriptionManager extends SubscriptionManager {
-  generateCalls: Array<{ vendor: SubscriptionVendor; prompt: string; referenceImages?: ReadonlyArray<{ data: Uint8Array; mediaType: string }> }>
+  generateCalls: Array<{ vendor: SubscriptionVendor; prompt: string; size?: string; quality?: string; referenceImages?: ReadonlyArray<{ data: Uint8Array; mediaType: string }> }>
 }
 
 /** 1x1 PNG the stub generate() returns; passes the format sniffing. */
@@ -1024,7 +1056,7 @@ const TINY_PNG = 'iVBORw0KGgo='
 
 /** In-memory SubscriptionManager: status per provider, generated PNGs, no network. */
 function stubSubscriptionManager(statuses: Partial<Record<SubscriptionProvider, { state: 'logged-in'; email: string } | { state: 'logged-out' }>>): StubSubscriptionManager {
-  const generateCalls: Array<{ vendor: SubscriptionVendor; prompt: string; referenceImages?: ReadonlyArray<{ data: Uint8Array; mediaType: string }> }> = []
+  const generateCalls: StubSubscriptionManager['generateCalls'] = []
   const manager = {
     generateCalls,
     async loginStatus(vendor: SubscriptionVendor) {
@@ -1034,14 +1066,18 @@ function stubSubscriptionManager(statuses: Partial<Record<SubscriptionProvider, 
       const status = statuses[provider]
       return status?.state === 'logged-in' ? { state: 'logged-in' as const, email: status.email } : { state: 'logged-out' as const }
     },
-    async generate(options: { vendor: SubscriptionVendor; prompt: string; referenceImages?: ReadonlyArray<{ data: Uint8Array; mediaType: string }> }) {
+    async generate(options: { vendor: SubscriptionVendor; prompt: string; size?: string; quality?: string; referenceImages?: ReadonlyArray<{ data: Uint8Array; mediaType: string }> }) {
       const vendor = options.vendor
       const provider = vendor === 'codex' ? 'chatgpt-sub' as const
         : vendor === 'antigravity' ? 'google-sub' as const
         : 'grok-sub' as const
       const status = statuses[provider]
       if (status?.state !== 'logged-in') throw new Error(`${String(vendor)} is not logged in`)
-      generateCalls.push({ vendor, prompt: options.prompt, ...(options.referenceImages !== undefined ? { referenceImages: options.referenceImages } : {}) })
+      generateCalls.push({ vendor, prompt: options.prompt,
+        ...(options.size !== undefined ? { size: options.size } : {}),
+        ...(options.quality !== undefined ? { quality: options.quality } : {}),
+        ...(options.referenceImages !== undefined ? { referenceImages: options.referenceImages } : {}),
+      })
       return [{ b64_json: TINY_PNG }]
     },
   }
