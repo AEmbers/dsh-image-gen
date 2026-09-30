@@ -34,12 +34,15 @@ function text(node: ReactNode): string {
   return 'props' in node ? text((node as Element).props.children) : ''
 }
 
-function formHarness(lang = 'zh') {
+function formHarness(lang = 'zh', initialValue: Record<string, unknown> = { openaiCompatBaseURL: 'https://relay.example/v1' }, provider = 'openai-compat') {
+  let stored = { ...initialValue }
   const setKey = vi.fn(async () => ({ ok: true }))
-  const setSetting = vi.fn(async () => {})
+  const setSetting = vi.fn(async (field: string, value: unknown): Promise<boolean | void> => {
+    stored = { ...stored, [field]: value }
+  })
   const props = {
     scope: {
-      getSnapshot: () => ({ writable: true, value: { openaiCompatBaseURL: 'https://relay.example/v1' } }),
+      getSnapshot: () => ({ writable: true, value: stored }),
       subscribe: vi.fn(), set: setSetting,
     },
     credentials: { describe: vi.fn(), set: setKey },
@@ -50,7 +53,7 @@ function formHarness(lang = 'zh') {
     hooks.cursor = 0
     return ImageGenerationSettingsCard(props)
   }
-  const row = () => elements(render()).find(element => element.key === 'openai-compat'
+  const row = () => elements(render()).find(element => element.key === provider
     && element.props.className?.startsWith('dsh-ig-provider-row '))!
   const find = (predicate: (element: Element) => boolean) => elements(row()).find(predicate)!
   elements(render()).find(element => element.props.className === 'dsh-ig-head')!.props.onClick()
@@ -58,6 +61,7 @@ function formHarness(lang = 'zh') {
   return {
     setKey, setSetting,
     rowText: () => text(row()),
+    typeURL: (value: string) => find(element => element.props.type === 'url').props.onChange({ target: { value } }),
     typeKey: (value: string) => find(element => element.props.type === 'password').props.onChange({ target: { value } }),
     keyValue: () => find(element => element.props.type === 'password').props.value,
     disabled: (label: string) => find(element => element.type === 'button' && text(element) === label).props.disabled,
@@ -151,5 +155,75 @@ describe('settings card credential actions', () => {
     expect(form.rowText()).toContain('Key 未配置')
     expect(form.keyValue()).toBe('sk-draft')
     expect(form.setKey).not.toHaveBeenCalled()
+  })
+})
+
+describe('settings card endpoint actions', () => {
+  it.each(['拉取模型', '测试连接'])('asks to save a newly entered relay address before %s', async action => {
+    const fetch = vi.fn(async () => ({ ok: true, json: async () => ({ ok: false, reason: 'error', message: 'Base URL is not configured' }) }))
+    vi.stubGlobal('fetch', fetch)
+    const form = formHarness('zh', {})
+    form.typeURL('https://relay.example/v1')
+    form.click(action)
+    expect(form.rowText()).toContain('接口地址尚未保存，请先点击保存')
+    expect(fetch).not.toHaveBeenCalled()
+    expect(form.setSetting).not.toHaveBeenCalled()
+  })
+
+  it.each(['拉取模型', '测试连接'])('asks for an empty relay address before %s', action => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const form = formHarness('zh', {})
+    form.click(action)
+    expect(form.rowText()).toContain('请填写接口地址并保存')
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each(['拉取模型', '测试连接'])('allows %s after the edited address is saved', async action => {
+    const fetch = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, models: ['gpt-image-1'] }) }))
+    vi.stubGlobal('fetch', fetch)
+    const form = formHarness()
+    form.typeURL('https://replacement.example/v1')
+    form.click(action)
+    expect(fetch).not.toHaveBeenCalled()
+    form.save()
+    await vi.waitFor(() => expect(form.rowText()).toContain('已保存'))
+    expect(form.setSetting).toHaveBeenCalledWith('openaiCompatBaseURL', 'https://replacement.example/v1')
+    form.click(action)
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+  })
+
+  it('keeps blocking requests when the address write is refused', async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const form = formHarness()
+    form.typeURL('https://replacement.example/v1')
+    form.setSetting.mockImplementationOnce(async () => {}).mockResolvedValueOnce(false)
+    form.save()
+    await vi.waitFor(() => expect(form.rowText()).toContain('设置未能保存'))
+    form.click('拉取模型')
+    expect(form.rowText()).toContain('接口地址尚未保存，请先点击保存')
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each(['拉取模型', '测试连接'])('localizes a missing saved address returned by the host during %s', async action => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ ok: false, reason: 'error', message: 'Base URL is not configured' }) })))
+    const form = formHarness()
+    form.click(action)
+    await vi.waitFor(() => expect(form.rowText()).toContain('未读取到已保存的接口地址，请保存后重试'))
+    expect(form.rowText()).not.toContain('Base URL is not configured')
+  })
+
+  it('checks edited official addresses too, while allowing unchanged defaults', async () => {
+    const fetch = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    vi.stubGlobal('fetch', fetch)
+    const form = formHarness('en', {}, 'openai')
+    form.typeURL('https://relay.example/v1')
+    form.click('Test connection')
+    expect(form.rowText()).toContain('The endpoint address has not been saved')
+    expect(fetch).not.toHaveBeenCalled()
+    form.typeURL('  https://api.openai.com/v1  ')
+    form.click('Test connection')
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
   })
 })
