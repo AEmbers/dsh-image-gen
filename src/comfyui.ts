@@ -1,6 +1,6 @@
 /** ComfyUI text-to-image and image-to-image adapters using an imported API-format workflow. */
 import type { ImageMediaType } from '@deepseek-ai/dsh-attachment'
-import { prepareComfyUIWorkflow, randomSeed } from './comfyui-workflow.js'
+import { prepareComfyUIWorkflow, randomSeed, resizeComfyUIWorkflow, type ComfyUIDimensions } from './comfyui-workflow.js'
 import { redactSecrets } from './redact.js'
 import { detectImageMediaType } from './reference-image.js'
 
@@ -32,9 +32,12 @@ export async function generateComfyUIImage(input: ComfyUIJobInput & {
   workflowJson: string
   prompt: string
   maxBytes: number
+  /** Overrides the latent size the workflow ships with, when it declares one. */
+  size?: ComfyUIDimensions | undefined
 }): Promise<GeneratedComfyUIImage> {
   const seed = randomSeed()
   const workflow = prepareComfyUIWorkflow(input.workflowJson, input.prompt, seed)
+  if (input.size !== undefined) resizeComfyUIWorkflow(workflow, input.size)
   const output = await runJob(input, async (baseURL, signal) => {
     const promptId = await submitWorkflow(baseURL, workflow, signal)
     const result = await waitForOutput(baseURL, promptId, signal)
@@ -49,11 +52,14 @@ export async function editComfyUIImage(input: ComfyUIJobInput & {
   prompt: string
   sourceImage: ComfyUISourceImage
   maxBytes: number
+  /** Overrides the latent size the workflow ships with, when it declares one. */
+  size?: ComfyUIDimensions | undefined
 }): Promise<GeneratedComfyUIImage> {
   const seed = randomSeed()
   const output = await runJob(input, async (baseURL, signal) => {
     const imageName = await uploadSourceImage(baseURL, input.sourceImage, signal)
     const workflow = prepareComfyUIWorkflow(input.workflowJson, input.prompt, seed, imageName)
+    if (input.size !== undefined) resizeComfyUIWorkflow(workflow, input.size)
     const promptId = await submitWorkflow(baseURL, workflow, signal)
     const result = await waitForOutput(baseURL, promptId, signal)
     return await downloadOutput(baseURL, result, input.maxBytes, signal)

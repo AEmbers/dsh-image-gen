@@ -146,7 +146,7 @@ export const SUBSCRIPTION_PROVIDERS = ['chatgpt-sub', 'grok-sub', 'google-sub'] 
 export type SubscriptionProvider = typeof SUBSCRIPTION_PROVIDERS[number]
 
 /** True when the provider generates through a logged-in subscription account. */
-export function isSubscriptionProvider(provider: ImageProvider): provider is SubscriptionProvider {
+export function isSubscriptionProvider(provider: string): provider is SubscriptionProvider {
   return (SUBSCRIPTION_PROVIDERS as readonly string[]).includes(provider)
 }
 
@@ -154,17 +154,46 @@ export function isSubscriptionProvider(provider: ImageProvider): provider is Sub
 export const CLOUD_IMAGE_PROVIDERS = ['google', 'openai', 'openai-compat', 'seedream', 'dashscope', 'xai', 'zhipu'] as const
 export type CloudImageProvider = typeof CLOUD_IMAGE_PROVIDERS[number]
 
+/** Row-id prefix of one ComfyUI workbench row: the id is `comfyui:<workflow name>`. */
+export const COMFYUI_STUDIO_PREFIX = 'comfyui:'
+/** A workbench row id owned by one imported ComfyUI workflow. */
+export type ComfyUIStudioProvider = `comfyui:${string}`
+
 /**
- * Providers the browser workbench can drive: the BYOK cloud set plus the
- * logged-in subscription channels. ComfyUI stays out; it has its own workflow
- * pipeline and no shared request shape.
+ * Providers the browser workbench can drive: the BYOK cloud set, the logged-in
+ * subscription channels, and the local ComfyUI provider.
+ *
+ * ComfyUI does not fit one row per provider. Its parameters live inside the
+ * imported workflow — the model file, the latent size and the sampler are nodes
+ * — so every workflow is its own workbench row and the row id carries the
+ * workflow name (`comfyui:anima-int8`). Bare `comfyui` is the placeholder row a
+ * profile shows while no workflow is imported yet.
  */
 export const STUDIO_PROVIDERS = [...CLOUD_IMAGE_PROVIDERS, ...SUBSCRIPTION_PROVIDERS] as const
-export type StudioProvider = CloudImageProvider | SubscriptionProvider
+export type StudioProvider = CloudImageProvider | SubscriptionProvider | 'comfyui' | ComfyUIStudioProvider
+
+/** Row id one imported workflow occupies in the workbench. */
+export function comfyUIStudioProvider(workflowName: string): ComfyUIStudioProvider {
+  return `${COMFYUI_STUDIO_PREFIX}${workflowName}`
+}
+
+/**
+ * Workflow name behind a ComfyUI row id: '' for the placeholder row, and
+ * undefined when the id belongs to another provider entirely.
+ */
+export function comfyUIStudioWorkflow(provider: string): string | undefined {
+  if (provider === 'comfyui') return ''
+  return provider.startsWith(COMFYUI_STUDIO_PREFIX) ? provider.slice(COMFYUI_STUDIO_PREFIX.length) : undefined
+}
+
+/** True for the local ComfyUI rows: the placeholder and every per-workflow id. */
+export function isComfyUIStudioProvider(provider: string): provider is 'comfyui' | ComfyUIStudioProvider {
+  return provider === 'comfyui' || provider.startsWith(COMFYUI_STUDIO_PREFIX)
+}
 
 /** True when the provider is selectable in the browser workbench. */
-export function isStudioProvider(provider: ImageProvider): provider is StudioProvider {
-  return (STUDIO_PROVIDERS as readonly string[]).includes(provider)
+export function isStudioProvider(provider: string): provider is StudioProvider {
+  return (STUDIO_PROVIDERS as readonly string[]).includes(provider) || isComfyUIStudioProvider(provider)
 }
 
 /** Timeout for one subscription image call, shared by the tool path and the
@@ -307,7 +336,12 @@ export interface StudioGeneratedItem {
 
 /** One completed workbench request. */
 export interface StudioGenerateResponse extends StudioGeneratedItem {
-  provider: StudioProvider
+  /**
+   * The provider that produced the image — the adapter, not the workbench row:
+   * a ComfyUI row id names one workflow, while results are recorded under the
+   * `comfyui` provider with that workflow as the model.
+   */
+  provider: ImageProvider
   model: string
   prompt: string
   createdAt: number

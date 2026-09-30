@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { parseImageAttachmentRef } from './reference-image.js'
 import {
-  STUDIO_PROVIDERS,
+  isStudioProvider,
   SUBSCRIPTION_TIMEOUT_MS,
   isSubscriptionProvider,
   type StudioConfigResponse,
@@ -179,7 +179,7 @@ function requiredText(value: unknown, message: string, maxLength?: number): stri
 }
 
 function studioProvider(value: unknown): value is StudioProvider {
-  return typeof value === 'string' && (STUDIO_PROVIDERS as readonly string[]).includes(value)
+  return typeof value === 'string' && isStudioProvider(value)
 }
 
 function imageMediaType(value: unknown): value is ImageMediaType {

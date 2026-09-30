@@ -248,12 +248,12 @@ pnpm dsh plugin --profile web add ./dsh-image-gen
 
 ### 🧩 本地 ComfyUI 多工作流
 
-灵活调用本地 GPU 算力，让私有化绘图无缝融入 Agent 对话。
+灵活调用本地 GPU 算力，让私有化绘图无缝融入 Agent 对话与图像工作台。
 
 - 导入并管理多个命名工作流，支持预设 Prompt 和常用占位符。
 - Agent 可按名称选择工作流，在对话中完成文生图和图生图。
-
-> ComfyUI 暂未接入 Studio 和多模型对比。
+- 工作台里**每个工作流各占一行**：比例由工作流的 latent 节点推导（按原像素预算等比换算），清晰度显示该工作流真正使用的步数 / CFG / 采样器——参数是读出来的，不是猜出来的。
+- 含 `{{image}}` 输入节点的工作流可在工作台做图生图（一次一张参考图）；本地任务串行排队，不和别的任务抢显存。
 
 <br />
 
@@ -371,9 +371,13 @@ DSH 按页面来源挑选设置表单：`127.0.0.1` / `localhost` 用宿主表�
 </details>
 
 <details>
-<summary><strong>为什么 ComfyUI 没有出现在 Studio 中？</strong></summary>
+<summary><strong>为什么工作台里看不到 / 用不了本地的 ComfyUI？</strong></summary>
 
-当前 Studio 与多模型对比仅支持云端 Provider，暂未接入 ComfyUI。ComfyUI 已支持在 Agent 对话中进行文生图、单图编辑以及多个命名工作流。
+工作台会为每个已导入的工作流显示一行「本地 ComfyUI · 工作流名」，比例与清晰度直接从工作流节点读出：比例来自 latent 节点（按工作流原本的像素预算等比换算），清晰度显示该工作流实际使用的步数 / CFG / 采样器。
+
+- **一行都没有**：还没导入工作流（设置 → 插件 → 图像生成 → ComfyUI 工作流）。此时工作台会保留一行灰色的「本地 ComfyUI」提示你导入，并且不可选。
+- **图生图不可用**：该工作流的 JSON 里没有 `{{image}}` 输入节点；图生图一次只接受一张参考图。
+- **生成失败**：先确认 ComfyUI 桌面版已经启动，且设置里的 Base URL（默认 `http://127.0.0.1:8188`）能从 DSH Host 访问。
 
 </details>
 

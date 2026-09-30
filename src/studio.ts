@@ -17,17 +17,23 @@ import { editGoogleImage, generateGoogleImage } from './google.js'
 import { editOpenAICompatibleImage, generateOpenAICompatibleImage } from './openai-compatible.js'
 import { editSeedreamImage } from './seedream.js'
 import { generateSubscriptionImage, vendorOf, type SubscriptionManager } from './subscription.js'
+import { comfyUIStudioSize, comfyUIStudioTarget, comfyUIStudioProfiles, runComfyUIStudio } from './comfyui-studio.js'
 import {
   CLOUD_IMAGE_PROVIDERS,
   DEFAULT_SUBSCRIPTION_MODELS,
   SUBSCRIPTION_PROVIDERS,
+  activeComfyUIWorkflow,
+  comfyUIStudioProvider,
+  isComfyUIStudioProvider,
   isSubscriptionProvider,
   type CloudImageProvider,
+  type ImageProvider,
   type StudioConfigResponse,
   type StudioGenerateRequest,
   type StudioGenerateResponse,
   type StudioGeneratedItem,
   type StudioOption,
+  type StudioProvider,
   type StudioProviderProfile,
   type StudioReference,
   type SubscriptionProvider,
@@ -154,16 +160,25 @@ export async function describeStudio(
     const signedIn = subStatuses.find(entry => entry[0] === provider)?.[1] === true
     return subscriptionStudioProfile(provider, signedIn)
   })
-  const profiles = [...cloudProfiles, ...subProfiles]
+  const profiles = [...cloudProfiles, ...subProfiles, ...comfyUIStudioProfiles(config)]
+  return { providers: profiles, activeProvider: activeStudioProvider(config, profiles) }
+}
+
+/**
+ * The row the workbench opens on: the persisted default provider when the
+ * workbench can drive it, otherwise the first configured row. A default of
+ * `comfyui` opens on the row of the configured active workflow, so the local
+ * model the user picked in settings is the one the canvas starts with.
+ */
+function activeStudioProvider(config: Config, profiles: readonly StudioProviderProfile[]): StudioProvider {
   const preferred = config.provider
-  const activeProvider = isStudioPreferred(preferred)
-    ? preferred
-    : profiles.find(profile => profile.configured)?.provider ?? 'google'
-  return { providers: profiles, activeProvider }
+  if (preferred === 'comfyui') return comfyUIStudioProvider(activeComfyUIWorkflow(config)?.name ?? '')
+  if (isStudioPreferred(preferred)) return preferred
+  return profiles.find(profile => profile.configured)?.provider ?? 'google'
 }
 
 /** The persisted default provider is usable directly when the workbench can drive it. */
-function isStudioPreferred(preferred: string | undefined): preferred is NonNullable<StudioConfigResponse['activeProvider']> {
+function isStudioPreferred(preferred: string | undefined): preferred is CloudImageProvider | SubscriptionProvider {
   return preferred !== undefined && (CLOUD_IMAGE_PROVIDERS as readonly string[]).includes(preferred)
     || preferred !== undefined && (SUBSCRIPTION_PROVIDERS as readonly string[]).includes(preferred)
 }
@@ -200,6 +215,11 @@ export async function generateFromStudio(
   fallbackWorkspaceRoot?: string | undefined,
   subscriptions?: SubscriptionManager | undefined,
 ): Promise<StudioGenerateResponse> {
+  // Local ComfyUI rows come first: they need no credential, share no wire
+  // contract with the cloud adapters, and render one graph at a time.
+  if (isComfyUIStudioProvider(input.provider)) {
+    return await generateComfyUIFromStudio(ctx, config, input, signal)
+  }
   // Subscription channels take a dedicated path: fixed model, channel-default
   // parameters, and a per-request sign-in check. Edit mode reads the
   // references through the same studio reader as the API-key channels.
@@ -292,12 +312,32 @@ export async function generateFromStudio(
     }
   }
 
+  return await runStudioBatch(input, input.provider, startedAt, 2, generateSingle)
+}
+
+/**
+ * Run one request `count` times and shape the workbench response.
+ * @param input - the validated request, read for its count and echoed back.
+ * @param provider - the adapter that produced the images, not the row id.
+ * @param startedAt - request start, for the elapsed time.
+ * @param concurrency - workers to run at once; a local GPU takes 1.
+ * @param generateSingle - generates and stores one image.
+ */
+async function runStudioBatch(
+  input: StudioGenerateRequest,
+  provider: ImageProvider,
+  startedAt: number,
+  concurrency: number,
+  generateSingle: (index: number) => Promise<StudioGeneratedItem>,
+): Promise<StudioGenerateResponse> {
+  const count = input.count ?? 1
+
   if (count === 1) {
     const single = await generateSingle(0)
     return {
       attachment: single.attachment,
       output: single.output,
-      provider: input.provider,
+      provider,
       model: input.model,
       prompt: input.prompt,
       createdAt: Date.now(),
@@ -310,9 +350,9 @@ export async function generateFromStudio(
   }
 
   const tasks = Array.from({ length: count }, (_, i) => () => generateSingle(i))
-  const poolResults = await runPool(tasks, 2)
+  const poolResults = await runPool(tasks, concurrency)
   const successes: StudioGeneratedItem[] = []
-  const errors: Array<{ index: number; message: string }> = []
+  const errors: Array<{ index: number, message: string }> = []
 
   for (let i = 0; i < poolResults.length; i++) {
     const r = poolResults[i]!
@@ -335,7 +375,7 @@ export async function generateFromStudio(
   return {
     attachment: first.attachment,
     output: first.output,
-    provider: input.provider,
+    provider,
     model: input.model,
     prompt: input.prompt,
     createdAt: Date.now(),
@@ -346,6 +386,53 @@ export async function generateFromStudio(
     ...(errors.length > 0 ? { errors } : {}),
     ...(first.savedTo ? { savedTo: first.savedTo } : {}),
   }
+}
+
+/**
+ * One browser request against an imported ComfyUI workflow: same reader and
+ * store as the cloud channels, but the workflow is the model and the graph
+ * carries the parameters.
+ */
+async function generateComfyUIFromStudio(
+  ctx: Context,
+  config: Config,
+  input: StudioGenerateRequest,
+  signal: AbortSignal,
+): Promise<StudioGenerateResponse> {
+  const target = comfyUIStudioTarget(config, input.provider, input.model)
+  if (target === undefined || !target.profile.configured) {
+    throw new Error('请先在设置中导入一个可用的 ComfyUI API 工作流')
+  }
+  assertAllowed(target.profile, input)
+
+  const references = input.references ?? (input.reference ? [input.reference] : [])
+  if (input.mode === 'edit' && references.length === 0) throw new Error('图生图需要至少一张参考图')
+  if (references.length > 1) throw new Error('ComfyUI 工作流一次只接受一张参考图，请只保留一张')
+  const sourceImage = input.mode === 'edit' ? await readStudioReference(ctx, references[0], signal) : undefined
+  const size = comfyUIStudioSize(input.ratio)
+  const startedAt = Date.now()
+
+  const generateSingle = async (index: number): Promise<StudioGeneratedItem> => {
+    const generated = await runComfyUIStudio(input, config, target.workflow, {
+      ...(size === undefined ? {} : { size }),
+      ...(sourceImage === undefined ? {} : { sourceImage }),
+      maxBytes: ctx.attachments.imageLimits.maxImageBytes,
+      signal,
+    })
+    if (!ctx.attachments.imageLimits.mediaTypes.includes(generated.mediaType)) {
+      throw new Error(`当前 DSH 不支持保存 ${generated.mediaType} 图片`)
+    }
+    const attachment = await ctx.attachments.saveImage({
+      data: generated.data,
+      mediaType: generated.mediaType,
+      name: (input.count ?? 1) > 1 ? `studio-image-${String(index + 1)}` : 'studio-image',
+    })
+    return { attachment, output: generated.output }
+  }
+
+  // ComfyUI renders one graph at a time on one GPU: queueing the batch keeps
+  // two workflows from fighting over the same VRAM.
+  return await runStudioBatch(input, 'comfyui', startedAt, 1, generateSingle)
 }
 
 export async function runPool<T>(
@@ -437,7 +524,7 @@ async function generateSubscriptionFromStudio(
   }
   if (count === 1) {
     const single = await generateSingle(0)
-    return subscriptionResponse(input, startedAt, 1, 0, [single], single)
+    return subscriptionResponse({ ...input, provider }, startedAt, 1, 0, [single], single)
   }
   const poolResults = await runPool(Array.from({ length: count }, (_, i) => () => generateSingle(i)), 2)
   const successes: StudioGeneratedItem[] = []
@@ -452,7 +539,7 @@ async function generateSubscriptionFromStudio(
     throw firstReason instanceof Error ? firstReason : new Error(String(firstReason))
   }
   const first = successes[0]!
-  return subscriptionResponse(input, startedAt, count, errors.length, successes, first, errors)
+  return subscriptionResponse({ ...input, provider }, startedAt, count, errors.length, successes, first, errors)
 }
 
 /** Describe what the subscription returned without presenting requested settings as actual output. */
@@ -469,7 +556,7 @@ function subscriptionOutput(ratio: string, quality: string, fallback: string, wi
 
 /** Assemble the subscription workbench response with exactOptionalPropertyTypes-safe spreads. */
 function subscriptionResponse(
-  input: StudioGenerateRequest,
+  input: StudioGenerateRequest & { provider: SubscriptionProvider },
   startedAt: number,
   requestedCount: number,
   failedCount: number,

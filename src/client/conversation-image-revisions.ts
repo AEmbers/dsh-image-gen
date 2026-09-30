@@ -1,11 +1,11 @@
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { STUDIO_PROVIDERS, type StudioProvider } from '../shared.js'
+import { IMAGE_PROVIDERS, type ImageProvider } from '../shared.js'
 
 /** One regenerated version displayed in place of an original conversation image. */
 export interface ConversationImageRevision {
   attachment: ImageAttachmentRef
   prompt: string
-  provider: StudioProvider
+  provider: ImageProvider
   model: string
   output: string
   createdAt: number
@@ -88,7 +88,7 @@ function isRevision(value: unknown): value is ConversationImageRevision {
   const candidate = value as Partial<ConversationImageRevision>
   return isAttachment(candidate.attachment)
     && typeof candidate.provider === 'string'
-    && (STUDIO_PROVIDERS as readonly string[]).includes(candidate.provider)
+    && (IMAGE_PROVIDERS as readonly string[]).includes(candidate.provider)
     && typeof candidate.prompt === 'string'
     && typeof candidate.model === 'string'
     && typeof candidate.output === 'string'

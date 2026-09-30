@@ -32,7 +32,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
-import { DELETE_ROUTE, SAVE_WORKSPACE_ROUTE, STUDIO_ROUTE, isSubscriptionProvider, type CloudImageProvider, type StudioConfigResponse, type StudioGenerateResponse, type StudioGeneratedItem, type StudioProvider, type StudioProviderProfile, type StudioReference } from '../shared.js'
+import { DELETE_ROUTE, SAVE_WORKSPACE_ROUTE, STUDIO_ROUTE, isComfyUIStudioProvider, isSubscriptionProvider, type CloudImageProvider, type StudioConfigResponse, type StudioGenerateResponse, type StudioGeneratedItem, type StudioProvider, type StudioProviderProfile, type StudioReference } from '../shared.js'
 import { deleteGalleryItem, getGalleryItems, saveGalleryItem, subscribeGallery, toggleFavoriteGalleryItem, type GalleryItem, saveFavoritePrompt, getFavoritePrompts, deleteFavoritePrompt, subscribeFavorites, addFavoriteFolder, getFavoriteFolders, deleteFavoriteFolder, moveFavoritePrompt, updateFavoritePrompt, type FavoritePrompt, type FavoriteFolder } from './gallery-store.js'
 import { evictAttachmentCache, fetchAttachmentBlob } from './image-cache.js'
 import { copyImageBlob, downloadBlobUrl, formatRelativeTime } from './browser-image-utils.js'
@@ -297,9 +297,9 @@ export const StudioView: FC<{
     return () => { observer.disconnect() }
   }, [])
 
-  const maxReferences = comparisonEnabled
-    ? (comparisonProviders.includes('dashscope') ? 3 : 5)
-    : (provider === 'dashscope' ? 3 : 5)
+  const maxReferences = comparisonEnabled && comparisonProviders.length > 0
+    ? Math.min(...comparisonProviders.map(referenceLimit))
+    : referenceLimit(provider)
   const referencesRef = useRef(references)
   referencesRef.current = references
 
@@ -480,7 +480,7 @@ export const StudioView: FC<{
   const configuredCount = config?.providers.filter(item => item.configured).length ?? 0
   // Split badge counts: BYOK keys and subscription sign-ins stay separately
   // visible so a number is never a mixed bag of semantics.
-  const apiConfiguredCount = config?.providers.filter(item => item.configured && !isSubscriptionProvider(item.provider)).length ?? 0
+  const apiConfiguredCount = config?.providers.filter(item => item.configured && !isSubscriptionProvider(item.provider) && !isComfyUIStudioProvider(item.provider)).length ?? 0
   const subscriptionSignedInCount = config?.providers.filter(item => item.configured && isSubscriptionProvider(item.provider)).length ?? 0
   const displayItems = useMemo(() => items.slice(0, visibleLimit), [items, visibleLimit])
   const comparisonProfiles = useMemo(
@@ -512,7 +512,7 @@ export const StudioView: FC<{
     const profile = config?.providers.find(item => item.provider === value)
     if (profile !== undefined) {
       applyProvider(profile)
-      const providerMax = value === 'dashscope' ? 3 : 5
+      const providerMax = referenceLimit(value)
       if (referencesRef.current.length > providerMax) {
         const keep = referencesRef.current.slice(0, providerMax)
         const overflow = referencesRef.current.slice(providerMax)
@@ -714,7 +714,7 @@ export const StudioView: FC<{
     if (selected === null) return
     const targetItem = selected
     const targetAttId = targetItem.attachment.attachmentId
-    const targetMax = targetItem.provider === 'dashscope' ? 3 : 5
+    const targetMax = referenceLimit(targetItem.provider)
 
     if (referencesRef.current.some(r => r.attachment?.attachmentId === targetAttId)) {
       setMode('edit')
@@ -1959,6 +1959,15 @@ const LOCALIZED_QUALITIES: Record<string, { zh: string; en: string }> = {
   xhigh: { zh: '超高', en: 'Extra High' },
   max: { zh: '最高', en: 'Max' },
   hd: { zh: '高清', en: 'HD' },
+}
+
+/**
+ * Source images one provider accepts per request. A ComfyUI workflow holds a
+ * single `{{image}}` placeholder, so its rows take exactly one reference.
+ */
+function referenceLimit(provider: string): number {
+  if (isComfyUIStudioProvider(provider)) return 1
+  return provider === 'dashscope' ? 3 : 5
 }
 
 function localizeRatioOptions(options: Array<{ value: string; label: string }>, lang: 'zh' | 'en'): Array<{ value: string; label: string }> {

@@ -248,12 +248,12 @@ Run the same prompt and reference images across multiple models, then compare an
 
 ### 🧩 Multiple local ComfyUI workflows
 
-Bring private image generation on your local GPU directly into Agent conversations.
+Bring private image generation on your local GPU directly into Agent conversations and the image workbench.
 
 - Import and manage multiple named workflows with prompt presets and common placeholders.
 - Let the Agent select a workflow by name for text-to-image or image-to-image generation in chat.
-
-> ComfyUI is not yet integrated into Studio or multi-model comparison.
+- **Every workflow is its own workbench row**: aspect ratios come from the workflow's latent node (rescaled at the graph's own pixel budget), and quality reports the steps / CFG / sampler that workflow actually runs — read out of the graph, never guessed.
+- Workflows with an `{{image}}` input can edit images in the workbench (one reference at a time), and local jobs queue instead of competing for the same VRAM.
 
 <br />
 
@@ -283,7 +283,7 @@ Bring private image generation on your local GPU directly into Agent conversatio
 | **Grok subscription (key-free)** | ✅ | ✅ Multiple | ✅ | ✅ |
 | **Google subscription (key-free)** | ✅ | ✅ Multiple | ✅ | ✅ |
 
-> Studio and multi-model comparison currently support cloud Providers only (subscription channels included). Multi-model comparison uses the model configured for each Provider in Settings.
+> Studio and multi-model comparison drive the BYOK cloud set, the subscription channels, and — since 0.9.0 — local ComfyUI. Multi-model comparison uses the model configured for each Provider in Settings; each imported ComfyUI workflow is one row named after that workflow.
 > Zhipu GLM-Image does not support image-to-image upstream. xAI image editing goes through the OpenAI-compatible protocol (multipart); some gateways may need further adaptation.
 > Subscription channels work through account sign-in (no API key). They support in-chat text-to-image / image-to-image, Studio batch generation, and multi-model comparison; edits ride each channel's edit endpoint (up to 5 reference images), with aspect ratio and quality selectable directly in Studio.
 
@@ -371,9 +371,13 @@ When “Save to workspace” is enabled, chat results are saved to the `dsh-imag
 </details>
 
 <details>
-<summary><strong>Why is ComfyUI not available in Studio?</strong></summary>
+<summary><strong>Why can't I see or use local ComfyUI in Studio?</strong></summary>
 
-Studio and multi-model comparison currently support cloud Providers only; ComfyUI is not yet integrated. ComfyUI supports text-to-image, single-image editing, and multiple named workflows through Agent chat.
+Studio lists one row per imported workflow, named “Local ComfyUI · workflow name”. Aspect ratio and quality are read straight out of that workflow: the ratio comes from its latent node (rescaled within the graph's own pixel budget), and quality reports the steps / CFG / sampler it actually runs.
+
+- **No row at all**: no workflow has been imported yet (Settings → Plugins → Image generation → ComfyUI workflows). Studio still shows one grey, unselectable “Local ComfyUI” row so the provider stays visible.
+- **Image-to-image unavailable**: that workflow has no `{{image}}` input node; edits take exactly one reference image.
+- **Generation fails**: make sure ComfyUI Desktop is running and that the configured Base URL (`http://127.0.0.1:8188` by default) is reachable from the DSH host.
 
 </details>
 

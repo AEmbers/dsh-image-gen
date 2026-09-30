@@ -23,6 +23,20 @@ import {
 } from '../src/client/conversation-image-revisions.js'
 import { buildComparisonTargets, comparisonOptionUnion, initialComparisonProviders } from '../src/client/multi-model-compare.js'
 
+/** Minimal API-format graph: prompt, latent size and sampler, as imported in settings. */
+const COMFYUI_STUDIO_GRAPH = JSON.stringify({
+  11: { class_type: 'CLIPTextEncode', inputs: { text: '{{prompt}}' } },
+  19: { class_type: 'KSampler', inputs: { seed: '{{seed}}', steps: 28, cfg: 3, sampler_name: 'euler_ancestral' } },
+  28: { class_type: 'EmptyLatentImage', inputs: { width: 832, height: 1216, batch_size: 1 } },
+})
+
+/** The same graph with the single `{{image}}` input an edit workflow needs. */
+const COMFYUI_EDIT_GRAPH = JSON.stringify({
+  1: { class_type: 'LoadImage', inputs: { image: '{{image}}' } },
+  11: { class_type: 'CLIPTextEncode', inputs: { text: '{{prompt}}' } },
+  19: { class_type: 'KSampler', inputs: { seed: '{{seed}}', steps: 8, cfg: 1, sampler_name: 'euler' } },
+})
+
 describe('multi-model comparison planning', () => {
   const profiles = [
     studioProfile({}, 'google', true),
@@ -163,8 +177,12 @@ describe('image workbench request validation', () => {
     })).toThrow('5')
   })
 
-  it('rejects ComfyUI at the browser boundary and accepts long prompts', () => {
-    expect(() => parseStudioGenerateRequest({ ...base, provider: 'comfyui' as never })).toThrow('Provider')
+  it('accepts ComfyUI rows at the browser boundary and rejects foreign providers', () => {
+    expect(parseStudioGenerateRequest({ ...base, provider: 'comfyui:anima-int8', model: 'anima-int8' }))
+      .toMatchObject({ provider: 'comfyui:anima-int8', model: 'anima-int8' })
+    expect(parseStudioGenerateRequest({ ...base, provider: 'comfyui', model: 'anima-int8' }))
+      .toMatchObject({ provider: 'comfyui' })
+    expect(() => parseStudioGenerateRequest({ ...base, provider: 'midjourney' as never })).toThrow('Provider')
     expect(() => parseStudioGenerateRequest({ ...base, prompt: '' })).toThrow('请输入提示词')
     expect(parseStudioGenerateRequest({ ...base, prompt: 'x'.repeat(20_000) })).toMatchObject({ prompt: 'x'.repeat(20_000) })
   })
@@ -221,7 +239,10 @@ describe('subscription workbench profiles', () => {
     })
     const config = await describeStudio(studioCtx(), {}, manager)
     const byProvider = new Map(config.providers.map(profile => [profile.provider, profile]))
-    expect([...byProvider.keys()]).toEqual([...CLOUD_IMAGE_PROVIDERS, ...SUBSCRIPTION_PROVIDERS])
+    expect([...byProvider.keys()]).toEqual([...CLOUD_IMAGE_PROVIDERS, ...SUBSCRIPTION_PROVIDERS, 'comfyui'])
+    // No workflow is imported in this fixture, so ComfyUI is one visible,
+    // unconfigured row rather than an absent provider.
+    expect(byProvider.get('comfyui')).toMatchObject({ label: '本地 ComfyUI', model: '', configured: false, supportsEditing: false })
 
     const chatgpt = byProvider.get('chatgpt-sub')!
     expect(chatgpt).toMatchObject({
@@ -248,8 +269,24 @@ describe('subscription workbench profiles', () => {
 
   it('falls back to the first configured provider when the preference cannot drive the workbench', async () => {
     const manager = stubSubscriptionManager({})
-    const config = await describeStudio(studioCtx(), { provider: 'comfyui' }, manager)
+    const config = await describeStudio(studioCtx(), { provider: 'retired-provider' as never }, manager)
     expect(config.activeProvider).toBe('google')
+  })
+
+  it('opens on the active workflow row when the preference is ComfyUI', async () => {
+    const manager = stubSubscriptionManager({})
+    const config = await describeStudio(studioCtx(), {
+      provider: 'comfyui',
+      comfyuiWorkflows: [{ name: 'anima-int8', json: COMFYUI_STUDIO_GRAPH }],
+      comfyuiActiveWorkflow: 'anima-int8',
+    }, manager)
+    expect(config.activeProvider).toBe('comfyui:anima-int8')
+    expect(config.providers.find(row => row.provider === 'comfyui:anima-int8')).toMatchObject({
+      label: '本地 ComfyUI · anima-int8',
+      model: 'anima-int8',
+      configured: true,
+      defaultRatio: 'auto@832x1216',
+    })
   })
 
   it('keeps a preferred subscription provider as the active workbench provider', async () => {
@@ -1213,5 +1250,145 @@ describe('streaming generation heartbeat', () => {
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()))
     }
+  })
+})
+
+describe('ComfyUI workbench generation', () => {
+  let originalFetch: typeof globalThis.fetch
+
+  beforeEach(() => { originalFetch = globalThis.fetch })
+  afterEach(() => { globalThis.fetch = originalFetch })
+
+  const comfyConfig = {
+    comfyuiWorkflows: [{ name: 'anima-int8', json: COMFYUI_STUDIO_GRAPH }],
+    comfyuiActiveWorkflow: 'anima-int8',
+    comfyuiBaseURL: 'http://127.0.0.1:8188',
+    comfyuiTimeoutMs: 5_000,
+  }
+
+  /** One ComfyUI job's three calls, answered from the requested URL. */
+  function comfyServer(): { peak: () => number, submitted: () => Array<Record<string, { inputs: Record<string, unknown> }>> } {
+    let active = 0
+    let peak = 0
+    let jobs = 0
+    const submitted: Array<Record<string, { inputs: Record<string, unknown> }>> = []
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      active += 1
+      peak = Math.max(peak, active)
+      await new Promise(resolve => setTimeout(resolve, 5))
+      active -= 1
+      const href = String(url)
+      if (href.endsWith('/prompt')) {
+        jobs += 1
+        submitted.push(JSON.parse(String(init?.body)).prompt as Record<string, { inputs: Record<string, unknown> }>)
+        return new Response(JSON.stringify({ prompt_id: `job-${String(jobs)}` }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      if (href.includes('/history/')) {
+        const id = href.split('/').pop()
+        return new Response(JSON.stringify({
+          [String(id)]: {
+            status: { status_str: 'success', completed: true },
+            outputs: { 1: { images: [{ filename: 'final.png', subfolder: '', type: 'output' }] } },
+          },
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/png' } })
+    })
+    return { peak: () => peak, submitted: () => submitted }
+  }
+
+  function comfyCtx(): any {
+    return {
+      credentials: { resolve: vi.fn().mockResolvedValue({ value: 'unused' }) },
+      attachments: {
+        imageLimits: { maxImageBytes: 10 * 1024 * 1024, mediaTypes: ['image/jpeg', 'image/png'] },
+        saveImage: vi.fn().mockImplementation(async ({ mediaType }: { mediaType: string }) => ({
+          attachmentId: `comfy-${mediaType}`,
+          mediaType,
+          bytes: 3,
+        })),
+      },
+      logger: { warn: vi.fn() },
+    }
+  }
+
+  it('runs the selected workflow and records the base provider', async () => {
+    const server = comfyServer()
+    const result = await generateFromStudio(comfyCtx(), comfyConfig, {
+      mode: 'generate',
+      provider: 'comfyui:anima-int8',
+      model: 'anima-int8',
+      prompt: 'a cat girl on a windowsill',
+      ratio: '1:1@1008x1008',
+      quality: 'workflow',
+    }, new AbortController().signal)
+
+    // The row id names one workflow; the result is recorded under the adapter.
+    expect(result).toMatchObject({ provider: 'comfyui', model: 'anima-int8', requestedCount: 1, failedCount: 0 })
+    expect(result.output).toMatch(/^1008×1008 · seed \d+$/)
+    expect(server.submitted()[0]?.['28']?.inputs).toMatchObject({ width: 1008, height: 1008 })
+    expect(server.submitted()[0]?.['11']?.inputs.text).toBe('a cat girl on a windowsill')
+  })
+
+  it('queues a batch instead of racing two graphs into one GPU', async () => {
+    const server = comfyServer()
+    const result = await generateFromStudio(comfyCtx(), comfyConfig, {
+      mode: 'generate',
+      provider: 'comfyui:anima-int8',
+      model: 'anima-int8',
+      prompt: 'a cat girl on a windowsill',
+      ratio: 'auto@832x1216',
+      quality: 'workflow',
+      count: 2,
+    }, new AbortController().signal)
+
+    expect(result.requestedCount).toBe(2)
+    expect(result.failedCount).toBe(0)
+    expect(result.items).toHaveLength(2)
+    expect(server.peak()).toBe(1)
+    expect(server.submitted()).toHaveLength(2)
+  })
+
+  it('rejects a second reference and an edit case the workflow cannot run', async () => {
+    const reference = {
+      attachment: { attachmentId: 'sha256:image', mediaType: 'image/png' as const, bytes: 8, width: 32, height: 32 },
+    }
+    const editable = {
+      ...comfyConfig,
+      comfyuiWorkflows: [
+        { name: 'anima-int8', json: COMFYUI_STUDIO_GRAPH },
+        { name: 'anima-edit', json: COMFYUI_EDIT_GRAPH },
+      ],
+    }
+    const base = {
+      mode: 'edit' as const,
+      model: 'anima-int8',
+      prompt: 'restyle this',
+      ratio: 'auto@832x1216',
+      quality: 'workflow',
+    }
+    await expect(generateFromStudio(comfyCtx(), editable, {
+      ...base,
+      provider: 'comfyui:anima-edit',
+      model: 'anima-edit',
+      ratio: 'workflow',
+      references: [reference, reference],
+    }, new AbortController().signal)).rejects.toThrow('只接受一张参考图')
+    await expect(generateFromStudio(comfyCtx(), editable, {
+      ...base,
+      provider: 'comfyui:anima-int8',
+      references: [reference],
+    }, new AbortController().signal)).rejects.toThrow('暂不支持图生图')
+  })
+
+  it('asks for an import when the requested workflow is gone', async () => {
+    await expect(generateFromStudio(comfyCtx(), { comfyuiWorkflows: [] }, {
+      mode: 'generate',
+      provider: 'comfyui:removed',
+      model: 'removed',
+      prompt: 'a cat girl',
+      ratio: 'workflow',
+      quality: 'workflow',
+    }, new AbortController().signal)).rejects.toThrow('请先在设置中导入')
   })
 })
