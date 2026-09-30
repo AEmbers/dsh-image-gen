@@ -357,6 +357,13 @@ If `dsh-image-gen` is absent from the output, run the installation command again
 </details>
 
 <details>
+<summary><strong>Opened over a LAN or public address, my settings snap back with “a setting could not be saved”?</strong></summary>
+
+DSH picks the settings form from the page origin: `127.0.0.1` / `localhost` gets the host-backed form, while any other origin (a LAN address, or the public hostname remote-web-ui serves) gets a page-local one whose writes never leave the browser. Since 0.8.6 the plugin reads and writes the Host settings namespace directly on those pages, so LAN and public addresses save normally too. If it still fails, check that the Host's `trustedHosts` covers the address you use, then hard-refresh the page (Ctrl+F5) to reload the client plugin.
+
+</details>
+
+<details>
 <summary><strong>Where are generated images saved?</strong></summary>
 
 When “Save to workspace” is enabled, chat results are saved to the `dsh-image-gen/` subdirectory of the current workspace by default. You can change this directory in Settings. Studio candidates remain on the temporary canvas until you select which results should enter the gallery and be saved.

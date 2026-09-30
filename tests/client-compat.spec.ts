@@ -28,6 +28,10 @@ function clientHarness(options: {
   remoteCredentials?: unknown
   uiConversation?: unknown
   transcriptView?: string
+  /** Settings namespace the Host serves as `remote.settings`, when it exposes one. */
+  remoteSettings?: unknown
+  /** Whether the served settings form keeps its state in the page instead of the Host. */
+  processLocalForm?: boolean
   /** Settings service generation the host ships; DSH 0.1.7+: configForms, 0.1.5/0.1.6: settingsScope. */
   settingsGeneration?: 'configForms' | 'settingsScope' | 'none'
 }): ClientHarness {
@@ -61,6 +65,7 @@ function clientHarness(options: {
   ctx.provide('connection', options.connection)
   ctx.provide('remote', options.remote)
   if (options.remoteCredentials !== undefined) ctx.provide('remote.credentials', options.remoteCredentials)
+  if (options.remoteSettings !== undefined) ctx.provide('remote.settings', options.remoteSettings)
   if (options.uiConversation !== undefined) ctx.provide('uiConversation', options.uiConversation)
   const legacyBind = vi.fn((options_: { namespace: string }) => ({
     getSnapshot: vi.fn(() => ({ value: undefined, writable: true })),
@@ -71,8 +76,12 @@ function clientHarness(options: {
   if (generation === 'configForms') {
     ctx.provide('configForms', {
       get: vi.fn((id: string) => ({
-        getSnapshot: vi.fn(() => ({ value: id === 'ui-chat' && options.transcriptView !== undefined
-          ? { transcriptView: options.transcriptView } : undefined })),
+        getSnapshot: vi.fn(() => ({
+          status: options.processLocalForm === true ? 'unavailable' : 'ready',
+          mode: options.processLocalForm === true ? 'memory' : 'host',
+          value: id === 'ui-chat' && options.transcriptView !== undefined
+            ? { transcriptView: options.transcriptView } : undefined,
+        })),
         subscribe: vi.fn(), set: vi.fn(),
       })),
     })
@@ -178,6 +187,48 @@ describe('DSH client compatibility', () => {
     const scope = (harness.settingsFace() as unknown as { scope: { getSnapshot(): unknown } }).scope
     expect(scope.getSnapshot()).toEqual({ value: undefined, writable: false })
     await expect(scope.set('provider', 'google' as never)).resolves.toBe(false)
+
+    await fiber.dispose()
+  })
+
+  it('reads and saves through the Host settings namespace when the page form is process-local', async () => {
+    // Away from 127.0.0.1 the served form keeps its state in the page and
+    // refuses every write before it reaches the Host, so the card must read and
+    // apply its edits on the settings namespace the host-backed form calls.
+    const describeNamespace = vi.fn(async () => ({
+      ok: true,
+      value: { namespaces: [{ ns: 'image-gen', value: { provider: 'comfyui' }, revision: 5 }], writable: true },
+    }))
+    const mutate = vi.fn(async () => ({
+      ok: true,
+      value: { ns: 'image-gen', value: { provider: 'openai' }, revision: 6 },
+    }))
+    const harness = clientHarness({
+      connection: {},
+      remote: { credentials: { describe: vi.fn(), set: vi.fn() } },
+      remoteSettings: { describe: describeNamespace, mutate },
+      processLocalForm: true,
+    })
+
+    const fiber = harness.ctx.plugin(plugin)
+    await fiber.await()
+
+    expect(fiber.state).toBe(2)
+    const injectSettingsCard = harness.registrations.get('settings.plugins.tab')
+    expect(() => injectSettingsCard?.()).not.toThrow()
+    const scope = (harness.settingsFace() as unknown as {
+      scope: {
+        getSnapshot(): { value: unknown, writable: boolean }
+        set(field: string, value: unknown): Promise<boolean | void>
+      }
+    }).scope
+
+    await vi.waitFor(() => {
+      expect(scope.getSnapshot()).toEqual({ value: { provider: 'comfyui' }, writable: true })
+    })
+    await expect(scope.set('provider', 'openai')).resolves.toBe(true)
+    expect(mutate).toHaveBeenCalledWith('image-gen', [{ op: 'set', path: ['provider'], value: 'openai' }], 5)
+    expect(scope.getSnapshot().value).toEqual({ provider: 'openai' })
 
     await fiber.dispose()
   })

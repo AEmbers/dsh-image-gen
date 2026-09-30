@@ -357,6 +357,13 @@ dsh --profile web --dump-config
 </details>
 
 <details>
+<summary><strong>从局域网或公网地址打开时，改设置立刻弹回并提示“有一项设置未能保存”？</strong></summary>
+
+DSH 按页面来源挑选设置表单：`127.0.0.1` / `localhost` 用宿主表单，其他来源（局域网 IP，或 remote-web-ui 提供的公网域名）用页面内表单，而页面内表单的写入根本不会发出去。0.8.6 起，插件在这类页面上直接读写宿主的设置命名空间，所以局域网和公网地址同样能正常保存。若仍有问题，请确认 Host 的 `trustedHosts` 已包含你访问的地址，然后硬刷新页面（Ctrl+F5）重新加载客户端插件。
+
+</details>
+
+<details>
 <summary><strong>生成图片保存在哪里？</strong></summary>
 
 开启“保存到工作区”后，对话生成结果默认保存在当前工作区的 `dsh-image-gen/` 子目录，也可以在设置中修改。Studio 候选图先留在临时画布，只有用户选中的结果才会进入图库并保存。

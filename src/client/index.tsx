@@ -72,6 +72,7 @@ import {
 import { conversationRegenerateRequest } from './conversation-regenerate.js'
 import { ImageProviderPill, PROVIDER_PILL_STYLE, type ProviderPillFace } from './provider-pill.js'
 import { writeSetting } from './settings-write.js'
+import { asRemoteSettingsNamespace, createHostSettingsScope } from './host-settings.js'
 
 /** Build timestamp injected by tsdown at bundle time. */
 declare const __CANVAS_BUILD_TS__: string
@@ -795,13 +796,16 @@ interface SettingsScopeApi {
   bind<T>(options: { namespace: string }): SettingsScope<T>
 }
 
-/** Host with neither settings generation: reads empty, writes refuse, never throws. */
-function degradedScope<T>(): SettingsScope<T> {
-  return {
-    getSnapshot: () => ({ value: undefined, writable: false }),
-    subscribe: () => () => {},
-    set: async () => false,
-  }
+/**
+ * Whether a settings form keeps its state inside the page instead of on the
+ * Host. DSH answers a non-loopback page with exactly that form: its reads stay
+ * empty and its `set()` resolves false without a round trip, so every edit
+ * reports a save failure the Host never saw.
+ * @param scope - the form the host's settings generation handed out.
+ */
+function isProcessLocalScope<T>(scope: SettingsScope<T>): boolean {
+  const snapshot = scope.getSnapshot() as { status?: unknown, mode?: unknown }
+  return snapshot.status === 'unavailable' || snapshot.mode === 'memory'
 }
 
 /** Mount the settings card, generated-image card, and native conversation gallery view. */
@@ -813,9 +817,32 @@ export function apply(ctx: Context): void {
   const settingsScopeApi = configForms === undefined
     ? ctx.get('settingsScope') as SettingsScopeApi | undefined
     : undefined
-  const scope = configForms?.get<ImageSettings>(IMAGE_GENERATION_ENTRY_ID)
+  const formScope = configForms?.get<ImageSettings>(IMAGE_GENERATION_ENTRY_ID)
     ?? settingsScopeApi?.bind<ImageSettings>({ namespace: IMAGE_GENERATION_NAMESPACE })
-    ?? degradedScope<ImageSettings>()
+  // Away from 127.0.0.1 (the LAN address, or the public hostname remote-web-ui
+  // serves) that form is process-local and refuses every write before it reaches
+  // the Host. Talk to the Host's own settings namespace there instead — the same
+  // namespace the host-backed form calls — so the card reads its real values and
+  // saves them wherever the page is opened from.
+  const hostScope = createHostSettingsScope<ImageSettings>(IMAGE_GENERATION_ENTRY_ID)
+  const scope: SettingsScope<ImageSettings> = formScope === undefined || isProcessLocalScope(formScope)
+    ? hostScope
+    : formScope
+  if (scope === hostScope) {
+    // The namespace resolves now on every host that serves it; a preview core
+    // that mounts it later is adopted through the deferred inject below.
+    const adoptSettings = (owner: Context): void => {
+      const namespace = asRemoteSettingsNamespace(owner.get('remote.settings'))
+      if (namespace !== undefined) hostScope.attach(namespace)
+    }
+    adoptSettings(ctx)
+    ctx.inject(['remote.settings'], adoptSettings)
+    ctx.effect(() => {
+      const remote = ctx.get('remote') as { $on?: (event: 'settings/document-updated', listener: () => void) => () => void } | undefined
+      if (typeof remote?.$on !== 'function') return () => {}
+      return remote.$on('settings/document-updated', () => { void hostScope.reload() })
+    }, 'dsh-image-gen: host settings refresh')
+  }
   const locale = ctx.get('locale') as LocaleService | undefined
   const promotion = { enabled: false }
 
