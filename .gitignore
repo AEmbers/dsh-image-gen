@@ -1,6 +1,19 @@
 node_modules/
-lib/
 *.tgz
 .DS_Store
 *.log
 .smoke-home/
+
+# Build output: only the two published bundles are tracked, so installing this
+# package straight from GitHub needs no install-time build (DSH's plugin manager
+# runs `pnpm add`, which refuses a git dependency that still has a `prepare`).
+# Everything else under lib/ is an intermediate: compile it with `pnpm run build`.
+lib/**/*.js
+lib/**/*.js.map
+lib/**/*.d.ts.map
+!lib/index.js
+!lib/client.js
+
+# The build copies these into lib/ for bundling (and inlines them into it);
+# the tracked originals live under src/inspiration/data/.
+lib/types/inspiration/data/
