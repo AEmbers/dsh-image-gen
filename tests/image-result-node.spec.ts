@@ -28,11 +28,11 @@ function match(event: Record<string, unknown>, role: 'start' | 'update', endSeq?
   return { event, role, location: location(1, endSeq), view: undefined }
 }
 
-function context(state: unknown, matches: readonly ReturnType<typeof match>[], endSeq?: number) {
+function context(state: unknown, matches: readonly ReturnType<typeof match>[], endSeq?: number, id = 'result:4') {
   return {
-    key: 'dsh-image-result:1',
+    key: `dsh-image-result:${id}`,
     kind: 'dsh-image-result',
-    id: '1',
+    id,
     matches,
     start: matches[0],
     state,
@@ -42,7 +42,6 @@ function context(state: unknown, matches: readonly ReturnType<typeof match>[], e
 }
 
 describe('promoted image result conversation node', () => {
-  const startEvent = { type: 'turn/start', seq: 1, time: 1000, data: { turn: 1 } }
   const resultEvent = {
     type: 'tool/result',
     seq: 4,
@@ -61,97 +60,54 @@ describe('promoted image result conversation node', () => {
       },
     },
   }
-  const answerEvent = {
-    type: 'assistant/message',
-    seq: 7,
-    time: 7000,
-    data: { turn: 1, step: 2, message: { content: [{ type: 'text', text: 'done' }] } },
-  }
-  const endEvent = { type: 'turn/end', seq: 8, time: 8000, data: { turn: 1 } }
-
-  const startMatch = match(startEvent, 'start')
-  const resultMatch = match(resultEvent, 'update')
-  const answerMatch = match(answerEvent, 'update')
-  const endMatch = match(endEvent, 'update', 8)
   const reader = { previous: () => undefined }
 
-  function replay(definition: ReturnType<typeof createImageResultDefinition>, closeTurn: boolean) {
-    let state = definition.start(context(undefined, [startMatch]), startMatch, reader)
-    state = definition.update(context(state, [startMatch, resultMatch]), resultMatch)
-    if (closeTurn) {
-      state = definition.update(context(state, [startMatch, resultMatch, answerMatch]), answerMatch)
-      state = definition.update(context(state, [startMatch, resultMatch, answerMatch, endMatch], 8), endMatch)
-    }
-    return state
-  }
-
-  it('re-anchors beside the final answer when the turn closes with an unknown transcript mode', () => {
+  it('keeps a finished image at its own result event even after the turn closes', () => {
     const definition = createImageResultDefinition()
-    const state = replay(definition, true)
-
-    const closedNode = definition.buildViewNode?.(
-      context(state, [startMatch, resultMatch, answerMatch, endMatch], 8),
-    )
-
-    expect(closedNode).toMatchObject({
+    const resultMatch = match(resultEvent, 'start', 8)
+    const state = definition.start(context(undefined, [resultMatch], 8), resultMatch, reader)
+    expect(definition.match({ type: 'assistant/message', seq: 7, data: { turn: 1 } })).toBeNull()
+    expect(definition.match({ type: 'turn/end', seq: 8, data: { turn: 1 } })).toBeNull()
+    expect(definition.buildViewNode(context(state, [resultMatch], 8))).toMatchObject({
       kind: 'dsh-image-result',
-      anchorSeq: 7,
+      anchorSeq: 4,
+      location: { kind: 'session' },
       data: { results: [{ attachment, prompt: 'a promoted image' }] },
     })
-    // Latest DSH folds ordinary nodes only while anchorSeq < answerAnchorSeq.
-    expect((closedNode as { anchorSeq: number }).anchorSeq).toBeGreaterThanOrEqual(7)
   })
 
-  it('keeps the image at its own tool/result position while the turn is open', () => {
+  it('keeps two images in the same turn at their separate result positions', () => {
     const definition = createImageResultDefinition()
-    let state = definition.start(context(undefined, [startMatch]), startMatch, reader)
-    state = definition.update(context(state, [startMatch, resultMatch]), resultMatch)
+    const secondAttachment = { ...attachment, attachmentId: 'sha256:second-image' }
+    const secondResultEvent = {
+      ...resultEvent,
+      seq: 10,
+      data: {
+        ...resultEvent.data,
+        message: { source: { callId: 'call-2' }, content: [] },
+        meta: { ...resultEvent.data.meta, attachment: secondAttachment, prompt: 'second image' },
+      },
+    }
+    const firstIdentity = definition.match(resultEvent)
+    const secondIdentity = definition.match(secondResultEvent)
+    expect(firstIdentity).toMatchObject({ role: 'start' })
+    expect(secondIdentity).toMatchObject({ role: 'start' })
+    expect(firstIdentity?.id).not.toBe(secondIdentity?.id)
 
-    const liveNode = definition.buildViewNode?.(context(state, [startMatch, resultMatch]))
-    expect(liveNode).toMatchObject({ kind: 'dsh-image-result', anchorSeq: 4 })
-
-    // A later assistant message within the same open Turn must not push the
-    // image below it (the reported bottom-pinning bug).
-    state = definition.update(context(state, [startMatch, resultMatch, answerMatch]), answerMatch)
-    const stillLiveNode = definition.buildViewNode?.(
-      context(state, [startMatch, resultMatch, answerMatch]),
-    )
-    expect(stillLiveNode).toMatchObject({ kind: 'dsh-image-result', anchorSeq: 4 })
-  })
-
-  it('keeps the natural position in normal transcript mode even when the turn closes', () => {
-    const definition = createImageResultDefinition({ isCompactTranscript: () => false })
-    const state = replay(definition, true)
-
-    const closedNode = definition.buildViewNode?.(
-      context(state, [startMatch, resultMatch, answerMatch, endMatch], 8),
-    )
-
-    expect(closedNode).toMatchObject({ kind: 'dsh-image-result', anchorSeq: 4 })
-  })
-
-  it('re-anchors beside the final answer in compact transcript mode when the turn closes', () => {
-    const definition = createImageResultDefinition({ isCompactTranscript: () => true })
-    const state = replay(definition, true)
-
-    const closedNode = definition.buildViewNode?.(
-      context(state, [startMatch, resultMatch, answerMatch, endMatch], 8),
-    )
-
-    expect(closedNode).toMatchObject({ kind: 'dsh-image-result', anchorSeq: 7 })
-  })
-
-  it('falls back to compact-safe anchoring when the transcript read throws', () => {
-    const definition = createImageResultDefinition({
-      isCompactTranscript: () => { throw new Error('settings unavailable') },
+    const firstMatch = match(resultEvent, 'start', 13)
+    const secondMatch = match(secondResultEvent, 'start', 13)
+    const firstState = definition.start(context(undefined, [firstMatch], 13, firstIdentity!.id), firstMatch, reader)
+    const secondState = definition.start(context(undefined, [secondMatch], 13, secondIdentity!.id), secondMatch, reader)
+    expect(definition.buildViewNode(context(firstState, [firstMatch], 13, firstIdentity!.id))).toMatchObject({
+      anchorSeq: 4,
+      location: { kind: 'session' },
+      data: { results: [{ attachment, prompt: 'a promoted image' }] },
     })
-    const state = replay(definition, true)
-
-    const closedNode = definition.buildViewNode?.(
-      context(state, [startMatch, resultMatch, answerMatch, endMatch], 8),
-    )
-
-    expect(closedNode).toMatchObject({ kind: 'dsh-image-result', anchorSeq: 7 })
+    expect(definition.buildViewNode(context(secondState, [secondMatch], 13, secondIdentity!.id))).toMatchObject({
+      anchorSeq: 10,
+      location: { kind: 'session' },
+      data: { results: [{ attachment: secondAttachment, prompt: 'second image' }] },
+    })
   })
 
   it('ignores unrelated and failed tool results', () => {
@@ -244,6 +200,7 @@ describe('ptc dispatch image results (#38)', () => {
     expect(node).toMatchObject({
       kind: 'dsh-image-result',
       anchorSeq: 19,
+      location: { kind: 'session' },
       data: {
         results: [{
           attachment: { attachmentId: 'sha256:ptc-image', mediaType: 'image/png' },

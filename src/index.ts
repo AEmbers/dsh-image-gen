@@ -19,7 +19,7 @@ import { serveImport } from './import-route.js'
 import { editOpenAICompatibleImage, generateOpenAICompatibleImage } from './openai-compatible.js'
 import { type ResolvedReferenceImage, resolveReferenceImages } from './reference-image.js'
 import { editSeedreamImage } from './seedream.js'
-import { generateSubscriptionImage, registerSubscriptionRoutes, SubscriptionManager } from './subscription.js'
+import { generateSubscriptionImage, registerSubscriptionRoutes, subscriptionToolParameters, SubscriptionManager } from './subscription.js'
 import { CANVAS_STATE_ROUTE, IMAGE_GENERATION_NAMESPACE, IMAGE_PROVIDERS, IMPORT_ROUTE, INSPIRATION_ROUTE, STUDIO_ROUTE, TEST_CONNECTION_ROUTE, mergeComfyUIPrompt, type ImageProvider } from './shared.js'
 import { createInspirationRoute } from './inspiration-route.js'
 import { BUNDLED_INSPIRATION_CATALOG, searchInspirationCases } from './inspiration.js'
@@ -27,6 +27,7 @@ import { generateFromStudio, describeStudio } from './studio.js'
 import { serveStudio } from './studio-route.js'
 import { serveTestConnection } from './test-route.js'
 import { deleteImageFromWorkspace, getDshWorkspaceRoots, getDshWorkspacesFull, saveImageToWorkspace } from './workspace-save.js'
+import { xaiToolParameters } from './xai-params.js'
 
 export { Config } from './config.js'
 export { IMAGE_ROUTE, DELETE_ROUTE, SAVE_WORKSPACE_ROUTE, imageAttachmentFromMeta } from './image-route.js'
@@ -69,7 +70,7 @@ interface SingleGenerationArgs {
 
 /** Ordered per-item outcomes for the generate_images batch tool. */
 interface BatchGeneratedValue {
-  images: { attachment: ImageAttachmentRef; provider: string; model: string; output: string; savedTo?: string; saveError?: string; prompt: string }[]
+  images: (GeneratedValue & { prompt: string })[]
   failures: { index: number; prompt: string; error: string }[]
 }
 
@@ -245,11 +246,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       return saveGenerated(ctx, generated, active.provider, workflow.name, 'API workflow', current(), exec, knownWorkspaceRoots)
     }
     if (active.provider === 'chatgpt-sub' || active.provider === 'grok-sub' || active.provider === 'google-sub') {
+      const subscriptionParams = subscriptionToolParameters(active.provider, { ...(args.size !== undefined ? { size: args.size } : {}), ...(args.aspect_ratio !== undefined ? { aspectRatio: args.aspect_ratio } : {}), ...(args.image_size !== undefined ? { imageSize: args.image_size } : {}) })
       const generated = await generateSubscriptionImage({
         manager: subscriptionManager,
         provider: active.provider,
         prompt: args.prompt,
-        ...(args.size !== undefined ? { size: args.size } : {}),
+        ...subscriptionParams,
         maxBytes: ctx.attachments.imageLimits.maxImageBytes,
         signal: exec.signal,
       })
@@ -267,6 +269,11 @@ export function apply(ctx: Context, config: Config = {}): void {
       const generated = await generateDashScopeImage({ apiKey: credential, endpoint: active.endpoint, model: active.model, prompt: args.prompt, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal })
       return saveGenerated(ctx, generated, active.provider, active.model, size, current(), exec, knownWorkspaceRoots)
     }
+    if (active.provider === 'xai') {
+      const extraBody = xaiToolParameters({ ...(args.aspect_ratio !== undefined ? { aspectRatio: args.aspect_ratio } : {}), ...(args.image_size !== undefined ? { imageSize: args.image_size } : {}), ...(args.size !== undefined ? { size: args.size } : {}) })
+      const generated = await generateOpenAICompatibleImage({ provider: 'xai', apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, extraBody, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal })
+      return saveGenerated(ctx, generated, active.provider, active.model, extraBody.aspect_ratio ?? 'auto', current(), exec, knownWorkspaceRoots)
+    }
     const size = args.size ?? active.imageSize
     // Ark output controls exist only on the Seedream profile; every other
     // provider in this branch ignores them.
@@ -282,9 +289,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       prompt: { type: 'string', required: true, description: 'Complete description of the image to generate.' },
       provider: { type: 'string', enum: ['google', 'openai', 'openai-compat', 'seedream', 'dashscope', 'xai', 'zhipu', 'comfyui', 'chatgpt-sub', 'grok-sub', 'google-sub'], description: 'Optional provider for this call only (for example when the user asks to use a specific provider); omit to use the configured default. chatgpt-sub, grok-sub, and google-sub generate through the logged-in subscription account instead of an API key.' },
       model: { type: 'string', description: 'Optional model name for this call only, overriding the configured model. Not used by ComfyUI (use workflow instead) nor by the subscription providers (model fixed by the subscription).' },
-      aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16'], description: 'Optional output aspect ratio for Google Gemini.' },
-      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini.' },
-      size: { type: 'string', description: 'Optional dimensions or size tier for OpenAI, Seedream, or DashScope.' },
+      aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9'], description: 'Optional output aspect ratio for Google Gemini, xAI Grok, and subscription channels.' },
+      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K).' },
+      size: { type: 'string', description: 'Optional dimensions or size tier for OpenAI, Seedream, or DashScope; WIDTHxHEIGHT maps to aspect_ratio for xAI Grok.' },
       workflow: { type: 'string', description: 'Optional name of the ComfyUI workflow to run; omit to use the active workflow from settings. Only meaningful when the ComfyUI provider is selected.' },
     },
     output: imageOutput('Generated'),
@@ -301,9 +308,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       prompts: { type: 'array', items: { type: 'string' }, required: true, description: 'Ordered complete prompts; one image is generated per entry (1-10).' },
       provider: { type: 'string', enum: ['google', 'openai', 'openai-compat', 'seedream', 'dashscope', 'xai', 'zhipu', 'comfyui', 'chatgpt-sub', 'grok-sub', 'google-sub'], description: 'Optional provider for this call only, applied to every item; omit to use the configured default.' },
       model: { type: 'string', description: 'Optional model name for this call only, applied to every item.' },
-      aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16'], description: 'Optional output aspect ratio for Google Gemini.' },
-      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini.' },
-      size: { type: 'string', description: 'Optional dimensions or size tier for OpenAI, Seedream, or DashScope.' },
+      aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9'], description: 'Optional output aspect ratio for Google Gemini, xAI Grok, and subscription channels.' },
+      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K).' },
+      size: { type: 'string', description: 'Optional dimensions or size tier for OpenAI, Seedream, or DashScope; WIDTHxHEIGHT maps to aspect_ratio for xAI Grok.' },
       workflow: { type: 'string', description: 'Optional name of the ComfyUI workflow to run; omit to use the active workflow from settings.' },
     },
     output: {
@@ -311,22 +318,27 @@ export function apply(ctx: Context, config: Config = {}): void {
         type: 'object', additionalProperties: false, properties: {
           images: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
             attachment: { type: 'object', required: true, additionalProperties: false, properties: {
-              attachmentId: { type: 'string', required: true }, mediaType: { type: 'string', required: true }, bytes: { type: 'integer', required: true }, width: { type: 'integer', required: true }, height: { type: 'integer', required: true }, name: { type: 'string' },
+              attachmentId: { type: 'string', required: true }, mediaType: { type: 'string', required: true }, bytes: { type: 'integer', required: true }, width: { type: 'integer', required: true }, height: { type: 'integer', required: true }, name: { type: 'string' }, originalDimensions: { type: 'object', additionalProperties: false, properties: { width: { type: 'integer', required: true }, height: { type: 'integer', required: true } } },
             } },
-            provider: { type: 'string', required: true }, model: { type: 'string', required: true }, output: { type: 'string', required: true }, savedTo: { type: 'string' }, saveError: { type: 'string' }, prompt: { type: 'string', required: true },
+            provider: { type: 'string', required: true }, model: { type: 'string', required: true }, output: { type: 'string', required: true }, savedTo: { type: 'string' }, saveError: { type: 'string' }, seed: { type: 'integer' }, prompt: { type: 'string', required: true },
           } } },
           failures: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
             index: { type: 'integer', required: true }, prompt: { type: 'string', required: true }, error: { type: 'string', required: true },
           } } },
         },
       },
-      render: (_args: unknown, value: BatchGeneratedValue) => [{
-        type: 'text' as const,
-        text: `Generated ${String(value.images.length)} of ${String(value.images.length + value.failures.length)} images.\n${[
-          ...value.images.map(image => `${String(image.prompt).slice(0, 80)} — attachment ${String(image.attachment.attachmentId)}${typeof image.savedTo === 'string' ? `, saved to ${image.savedTo}` : ''}`),
-          ...value.failures.map(failure => `${failure.prompt.slice(0, 80)} — failed: ${failure.error}`),
-        ].join('\n')}\nEach generated image is attached to the conversation; respond without reading or searching for them.`,
-      }],
+      render: (_args: unknown, value: BatchGeneratedValue) => [
+        {
+          type: 'text' as const,
+          text: `Generated ${String(value.images.length)} of ${String(value.images.length + value.failures.length)} images.\n${value.failures.map(failure => `${failure.prompt.slice(0, 80)} — failed: ${failure.error}`).join('\n')}`,
+        },
+        ...value.images.flatMap(image => imageOutput('Generated').render({}, image).map(block =>
+          block.type === 'text' ? { ...block, text: `${block.text}\nImage prompt: ${image.prompt}` } : block)),
+      ],
+      presentationMeta: (_args: unknown, value: BatchGeneratedValue) => ({
+        kind: 'dsh-image-gen-batch',
+        images: value.images.map(image => imageOutput('Generated').presentationMeta({ prompt: image.prompt }, image)),
+      }),
     },
     async execute(args, exec): Promise<BatchGeneratedValue> {
       if (args.prompts.length === 0) throw new Error('generate_images requires at least one prompt')
@@ -348,18 +360,14 @@ export function apply(ctx: Context, config: Config = {}): void {
             ...(args.size !== undefined ? { size: args.size } : {}),
             ...(args.workflow !== undefined ? { workflow: args.workflow } : {}),
           }, exec)
-          images.push({
-            attachment: value.attachment, provider: value.provider, model: value.model, output: value.output,
-            ...(typeof value.savedTo === 'string' ? { savedTo: value.savedTo } : {}),
-            ...(typeof value.saveError === 'string' ? { saveError: value.saveError } : {}),
-            prompt,
-          })
+          images.push({ ...value, prompt })
         } catch (error) {
           failures.push({ index, prompt, error: error instanceof Error ? error.message : String(error) })
         }
       }
       return { images, failures }
     },
+    presentResult: (_args, result) => imagePresentation(result),
   }))
 
   ctx.tools.register(defineTool({
@@ -374,9 +382,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       source_attachment_ids: { type: 'array', items: { type: 'string' }, description: 'Optional ordered attachment ids of multiple images already present in the current conversation. Prompt references such as image 1 and image 2 follow this order.' },
       source_path: { type: 'string', description: 'Optional absolute or workspace-relative path of a specific image file inside the active session workspace. Prefer this when the user names a saved file.' },
       source_paths: { type: 'array', items: { type: 'string' }, description: 'Optional ordered absolute or workspace-relative paths of multiple image files inside the active session workspace.' },
-      aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16'], description: 'Optional output aspect ratio for Google Gemini.' },
-      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini.' },
-      size: { type: 'string', description: 'Optional output size for OpenAI, Seedream, or DashScope.' },
+      aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9'], description: 'Optional output aspect ratio for Google Gemini, xAI Grok, and subscription channels.' },
+      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K).' },
+      size: { type: 'string', description: 'Optional output size for OpenAI, Seedream, or DashScope; WIDTHxHEIGHT maps to aspect_ratio for xAI Grok.' },
       workflow: { type: 'string', description: 'Optional name of the ComfyUI workflow to run; omit to use the active workflow from settings. Only meaningful when the ComfyUI provider is selected.' },
     },
     output: imageOutput('Edited'),
@@ -431,12 +439,13 @@ export function apply(ctx: Context, config: Config = {}): void {
 
       if (active.provider === 'chatgpt-sub' || active.provider === 'grok-sub' || active.provider === 'google-sub') {
         if (sourceImages.length === 0) throw new Error('edit_image requires a reference image')
+        const subscriptionParams = subscriptionToolParameters(active.provider, { ...(args.size !== undefined ? { size: args.size } : {}), ...(args.aspect_ratio !== undefined ? { aspectRatio: args.aspect_ratio } : {}), ...(args.image_size !== undefined ? { imageSize: args.image_size } : {}) })
         const generated = await generateSubscriptionImage({
           manager: subscriptionManager,
           provider: active.provider,
           prompt: args.prompt,
           sourceImages,
-          ...(args.size !== undefined ? { size: args.size } : {}),
+          ...subscriptionParams,
           maxBytes: ctx.attachments.imageLimits.maxImageBytes,
           signal: exec.signal,
         })
@@ -453,8 +462,9 @@ export function apply(ctx: Context, config: Config = {}): void {
 
       const size = args.size ?? active.imageSize
       if (active.provider === 'openai' || active.provider === 'openai-compat' || active.provider === 'xai' || active.provider === 'zhipu') {
-        const generated = await editOpenAICompatibleImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, ...(active.provider === 'openai-compat' ? { editFormat: active.editFormat, editExtra: active.editExtra } : {}) })
-        return saveGenerated(ctx, generated, active.provider, active.model, size, current(), exec, knownWorkspaceRoots)
+        const xaiExtraBody = active.provider === 'xai' ? xaiToolParameters({ ...(args.aspect_ratio !== undefined ? { aspectRatio: args.aspect_ratio } : {}), ...(args.image_size !== undefined ? { imageSize: args.image_size } : {}), ...(args.size !== undefined ? { size: args.size } : {}) }) : undefined
+        const generated = await editOpenAICompatibleImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, sourceImages, ...(active.provider === 'xai' ? {} : { size }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, ...(active.provider === 'openai-compat' ? { editFormat: active.editFormat, editExtra: active.editExtra } : active.provider === 'xai' ? { editFormat: 'xaiJson' as const, ...(xaiExtraBody === undefined ? {} : { extraBody: xaiExtraBody }) } : {}) })
+        return saveGenerated(ctx, generated, active.provider, active.model, active.provider === 'xai' ? (xaiExtraBody?.aspect_ratio ?? 'auto') : size, current(), exec, knownWorkspaceRoots)
       }
       if (active.provider === 'seedream') {
         const generated = await editSeedreamImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, arkOptions: active.arkOptions })
@@ -572,6 +582,15 @@ async function saveGenerated(
 }
 
 function imagePresentation(result: ToolResult) {
+  const meta = result.meta
+  if (typeof meta === 'object' && meta !== null && !Array.isArray(meta)
+    && meta.kind === 'dsh-image-gen-batch' && Array.isArray(meta.images)) {
+    const content = meta.images.flatMap(image => {
+      const attachment = imageAttachmentFromMeta(image)
+      return attachment === undefined ? [] : [{ type: 'image' as const, attachment }]
+    })
+    return content.length === 0 ? undefined : { card: 'generic' as const, title: 'Generated images', content }
+  }
   const attachment = imageAttachmentFromMeta(result.meta)
   return attachment === undefined ? undefined : { card: 'generic' as const, title: 'Generated image', content: [{ type: 'image' as const, attachment }] }
 }

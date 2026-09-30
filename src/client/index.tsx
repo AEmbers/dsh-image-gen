@@ -59,6 +59,7 @@ import { INSPIRATION_STYLE } from './inspiration-style.js'
 import {
   IMAGE_RESULT_NODE_KIND,
   createImageResultDefinition,
+  imageResultsFromMeta,
   type ImageResultPresentation,
 } from './image-result-node.js'
 import {
@@ -202,6 +203,7 @@ const DICT = {
     subBadgeUnknown: '状态未知',
     subSectionTitle: '订阅生图',
     subHint: '通过已登录的订阅账号生图，无需 API Key。登录在你的授权下进行，不会修改任何 API Key 或默认 Provider。',
+    subProxyHint: '需要代理时，请在登录前开启代理软件的 TUN（虚拟网卡）模式。普通系统代理可能无法覆盖 DSH 后端请求，导致网页授权后登录失败。',
     subAccountLabel: '账号',
     subAccountEmail: '已登录：{email}',
     subAccountNone: '未登录',
@@ -236,6 +238,9 @@ const DICT = {
     clearKeyFailed: '清除 Key 失败',
     saveKeyFailed: '保存 Key 失败',
     saveKeyFirst: '请先保存 API Key，再拉取模型或测试连接。',
+    saveEndpointFirst: '接口地址尚未保存，请先点击保存，再拉取模型或测试连接。',
+    endpointRequired: '请填写接口地址并保存，再拉取模型或测试连接。',
+    savedEndpointMissing: '未读取到已保存的接口地址，请保存后重试。',
     clearKeyUnsupported: '当前版本 DSH 不支持在此清除 Key，请到凭据管理中删除。',
     endpoint: '接口地址',
     reset: '重置',
@@ -347,6 +352,7 @@ const DICT = {
     subBadgeUnknown: 'Unknown',
     subSectionTitle: 'Subscription generation',
     subHint: 'Generates through a logged-in subscription account; no API key needed. Signing in never changes any API key or the default provider.',
+    subProxyHint: 'If you need a proxy, enable TUN (virtual network adapter) mode before signing in. A system proxy alone may not cover DSH backend requests, causing sign-in to fail after browser authorization.',
     subAccountLabel: 'Account',
     subAccountEmail: 'Signed in: {email}',
     subAccountNone: 'Not signed in',
@@ -381,6 +387,9 @@ const DICT = {
     clearKeyFailed: 'Failed to clear key',
     saveKeyFailed: 'Failed to save the key',
     saveKeyFirst: 'Save the API key first, then fetch models or test the connection.',
+    saveEndpointFirst: 'The endpoint address has not been saved. Click Save before fetching models or testing the connection.',
+    endpointRequired: 'Enter and save an endpoint address before fetching models or testing the connection.',
+    savedEndpointMissing: 'No saved endpoint address was found. Save it and try again.',
     clearKeyUnsupported: 'This DSH build cannot clear keys here; remove it from credential management instead.',
     endpoint: 'Endpoint / Base URL',
     reset: 'Reset',
@@ -807,20 +816,6 @@ export function apply(ctx: Context): void {
   const scope = configForms?.get<ImageSettings>(IMAGE_GENERATION_ENTRY_ID)
     ?? settingsScopeApi?.bind<ImageSettings>({ namespace: IMAGE_GENERATION_NAMESPACE })
     ?? degradedScope<ImageSettings>()
-  // Host-owned chat transcript preference ("ui-chat"), read through the same
-  // generation's reader: 0.1.7 via the form id, older hosts via the namespace.
-  const chatScope = configForms?.get<{ transcriptView?: string }>('ui-chat')
-    ?? settingsScopeApi?.bind<{ transcriptView?: string }>({ namespace: 'ui-chat' })
-    ?? degradedScope<{ transcriptView?: string }>()
-  // 0.1.7 renamed the modes to compact/standard/detailed/verbose (legacy
-  // `normal` maps to `standard`). Unknown or unloaded modes use Compact-safe
-  // anchoring; legacy hosts know just normal/compact.
-  const isCompactTranscript = (): boolean => {
-    const mode = chatScope.getSnapshot().value?.transcriptView
-    return configForms === undefined
-      ? mode !== 'normal'
-      : mode !== 'standard' && mode !== 'detailed' && mode !== 'verbose'
-  }
   const locale = ctx.get('locale') as LocaleService | undefined
   const promotion = { enabled: false }
 
@@ -864,7 +859,7 @@ export function apply(ctx: Context): void {
       promotion.enabled = true
       const ownerRegister = owner.slots.register.bind(owner.slots) as unknown as (options: object, component: unknown) => () => void
       owner.effect(
-      () => uiConversation.events.register(createImageResultDefinition({ isCompactTranscript })),
+      () => uiConversation.events.register(createImageResultDefinition()),
       'dsh-image-gen: promoted image result node',
       )
       ;(owner.slots.inject as any)('conversation.chat.node', () => ownerRegister({
@@ -977,6 +972,11 @@ export function apply(ctx: Context): void {
     key: 'generate_image',
     inject: (): ImageCardFace => ({ locale, promoted: promotion.enabled }),
   }, GeneratedImageCard))
+  ctx.slots.inject('tool.call.toolview', () => register({
+    name: 'tool.call.toolview',
+    key: 'generate_images',
+    inject: (): ImageCardFace => ({ locale, promoted: promotion.enabled }),
+  }, GeneratedImagesCard))
   ctx.slots.inject('tool.call.toolview', () => register({
     name: 'tool.call.toolview',
     key: 'edit_image',
@@ -1548,10 +1548,26 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
     }
   }
 
+  /** These actions use host settings, so drafts must be saved before making a request. */
+  const providerActionBlockMessage = (provider: Provider): string | undefined => {
+    const row = rows[provider]
+    if (row.keyInput.trim().length > 0) return t('saveKeyFirst')
+    if (isSubscriptionProvider(provider)) return undefined
+    const address = row.baseURL.trim()
+    if (address.length === 0) return t('endpointRequired')
+    if (address !== baseURLOf(provider, props.scope.getSnapshot().value).trim()) return t('saveEndpointFirst')
+    return undefined
+  }
+
+  /** Localize the host's missing-address error while preserving upstream details. */
+  const providerErrorMessage = (message: string | undefined): string =>
+    message === 'Base URL is not configured' ? t('savedEndpointMissing') : message ?? t('testFailed')
+
   /** Probe through the host route so the browser side never touches credential values. */
   const testConnection = async (provider: Provider): Promise<void> => {
-    if (rows[provider].keyInput.trim().length > 0) {
-      updateRow(provider, { message: t('saveKeyFirst'), messageIsError: false, testResult: undefined })
+    const blocked = providerActionBlockMessage(provider)
+    if (blocked !== undefined) {
+      updateRow(provider, { message: blocked, messageIsError: false, testResult: undefined })
       return
     }
     updateRow(provider, { testing: true, testResult: undefined, message: '', messageIsError: false })
@@ -1572,8 +1588,9 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
 
   /** Pull the provider's image-capable model ids through the host route (Google and the OpenAI family). */
   const fetchProviderModels = async (provider: CloudImageProvider): Promise<void> => {
-    if (rows[provider].keyInput.trim().length > 0) {
-      updateRow(provider, { modelFetchMessage: t('saveKeyFirst'), modelFetchIsError: false })
+    const blocked = providerActionBlockMessage(provider)
+    if (blocked !== undefined) {
+      updateRow(provider, { modelFetchMessage: blocked, modelFetchIsError: false })
       return
     }
     updateRow(provider, { fetchingModels: true, modelFetchMessage: '', modelFetchIsError: false })
@@ -1597,7 +1614,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
       } else if (payload.reason === 'unauthorized') {
         updateRow(provider, { modelFetchMessage: t('testUnauthorized'), modelFetchIsError: true })
       } else {
-        updateRow(provider, { modelFetchMessage: payload.message ?? t('testFailed'), modelFetchIsError: true })
+        updateRow(provider, { modelFetchMessage: providerErrorMessage(payload.message), modelFetchIsError: true })
       }
     } catch (cause) {
       updateRow(provider, { modelFetchMessage: cause instanceof Error ? cause.message : String(cause), modelFetchIsError: true })
@@ -1630,7 +1647,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
     if (result.ok) return t('testOk')
     if (result.reason === 'missing-key') return t('badgeMissing')
     if (result.reason === 'unauthorized') return t('testUnauthorized')
-    return `${t('testFailed')}${result.message !== undefined && result.message.length > 0 ? `: ${result.message}` : ''}`
+    return `${t('testFailed')}${result.message !== undefined && result.message.length > 0 ? `: ${providerErrorMessage(result.message)}` : ''}`
   }
 
   const badgeOf = (provider: Provider): { text: string; className: string } => {
@@ -1971,6 +1988,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
           <div className="dsh-ig-field">
             <span className="dsh-ig-label">{t('subSectionTitle')}</span>
             <p className="dsh-ig-hint">{t('subHint')}</p>
+            <p className="dsh-ig-hint" role="note">{t('subProxyHint')}</p>
           </div>
           <div className="dsh-ig-field">
             <span className="dsh-ig-label">{t('subAccountLabel')}</span>
@@ -2111,11 +2129,37 @@ export function GeneratedImageCard(props: ImageCardProps) {
   return <ImageResultCard result={result} locale={props.locale} sessionId={(props as any).sessionId} />
 }
 
+/** Suppress the folded duplicate on modern hosts; render every image on legacy hosts. */
+export function GeneratedImagesCard(props: ImageCardProps) {
+  const block = props.block as unknown as {
+    kind?: string
+    meta?: unknown
+    resultView?: { card?: string; meta?: unknown; content?: Array<{ type: string; text?: string; attachment?: ImageResultPresentation['attachment'] }> }
+    content?: Array<{ type: string; text?: string; attachment?: ImageResultPresentation['attachment'] }>
+  }
+  let results = imageResultsFromMeta(block.meta ?? block.resultView?.meta)
+  if (results.length === 0 && 'kind' in block) {
+    const content = block.resultView?.card === 'generic' ? block.resultView.content : block.content
+    results = (content ?? []).flatMap(item => item.type === 'image' && item.attachment !== undefined
+      ? [{ attachment: item.attachment, prompt: 'Generated Image', provider: '', model: '', output: '' }]
+      : [])
+  }
+  if (props.promoted && results.length > 0) return <PromotedResultNotice locale={props.locale} />
+  if (results.length === 0) {
+    if (!('kind' in block)) return <ImageResultCard locale={props.locale} />
+    const content = block.content ?? block.resultView?.content ?? []
+    return <div>{content.filter(item => item.type === 'text').map((item, index) => <p key={index}>{item.text}</p>)}</div>
+  }
+  return <div className="dsh-ig-promoted-results">
+    {results.map((result, index) => <ImageResultCard key={`${result.attachment.attachmentId}:${index}`} result={result} locale={props.locale} sessionId={(props as any).sessionId} />)}
+  </div>
+}
+
 /** Render modern image artifacts as final conversation output instead of Tool process content. */
 export function PromotedImageResultNode(props: ImageResultNodeProps) {
   return <div className="dsh-ig-promoted-results">
-    {props.node.data.results.map(result =>
-      <ImageResultCard key={result.attachment.attachmentId} result={result} locale={props.locale} sessionId={(props as any).sessionId} />)}
+    {props.node.data.results.map((result, index) =>
+      <ImageResultCard key={`${result.attachment.attachmentId}:${index}`} result={result} locale={props.locale} sessionId={(props as any).sessionId} />)}
   </div>
 }
 

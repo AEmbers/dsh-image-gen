@@ -22,7 +22,17 @@ export async function generateOpenAICompatibleImage(input: {
   baseURL: string
   model: string
   prompt: string
-  size: string
+  /**
+   * Pixel size or tier string. Optional because not every channel accepts
+   * `size` at all — xAI takes aspect_ratio+resolution via `extraBody` and
+   * rejects nothing but silently ignores unknown fields, so we simply omit
+   * the parameter for it.
+   */
+  size?: string
+  /** Vendor quality tier (e.g. OpenAI low/medium/high); omitted when unset. */
+  quality?: string
+  /** Extra JSON fields merged last into the generations body (xAI aspect_ratio/resolution). */
+  extraBody?: Readonly<Record<string, unknown>>
   maxBytes: number
   signal: AbortSignal
   /** Ark-only output controls; ignored by every other provider. */
@@ -34,18 +44,20 @@ export async function generateOpenAICompatibleImage(input: {
     body: JSON.stringify({
       model: input.model,
       prompt: input.prompt,
-      size: input.size,
+      ...(input.size === undefined ? {} : { size: input.size }),
+      ...(input.quality === undefined ? {} : { quality: input.quality }),
       // `background: false` — Ark rejects `transparent` on this endpoint
       // outright (it needs exactly one input image), so it is the edit path's
       // option alone.
       ...(input.provider === 'seedream' ? { response_format: 'url', ...arkOutputBody(input.arkOptions, { background: false }) } : {}),
+      ...(input.extraBody ?? {}),
     }),
   })
   return parseImageResponse(response, input.provider, input)
 }
 
 /** How the edits endpoint expects its request body (#41). */
-export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages'
+export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'xaiJson'
 
 export async function editOpenAICompatibleImage(input: {
   apiKey: string
@@ -69,7 +81,30 @@ export async function editOpenAICompatibleImage(input: {
    * `watermark`/`prompt_extend`. Ignored in multipart mode.
    */
   editExtra?: Readonly<Record<string, unknown>>
+  /** Vendor quality tier sent with the edit request when set. */
+  quality?: string
+  /**
+   * Extra fields for the edit request (multipart: one form field per entry;
+   * JSON shapes: merged after `editExtra`), e.g. xAI's
+   * aspect_ratio/resolution pair.
+   */
+  extraBody?: Readonly<Record<string, unknown>>
 }): Promise<GeneratedCompatibleImage> {
+  if (input.editFormat === 'xaiJson') {
+    const references = input.sourceImages.map(image => ({ type: 'image_url', url: toDataUrl(image) }))
+    const response = await fetch(imageEndpoint(input.baseURL, 'edits'), {
+      method: 'POST', redirect: 'error', signal: input.signal,
+      headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: input.model,
+        prompt: input.prompt,
+        ...(references.length === 1 ? { image: references[0] } : { images: references }),
+        ...(input.quality === undefined ? {} : { quality: input.quality }),
+        ...(input.extraBody ?? {}),
+      }),
+    })
+    return parseImageResponse(response, 'xai', input)
+  }
   if (input.editFormat === 'jsonImageUrlArray') {
     const body = {
       model: input.model,
@@ -82,7 +117,9 @@ export async function editOpenAICompatibleImage(input: {
       // (merged last) can still override it for other channels.
       size: 'auto' as const,
       response_format: 'url',
+      ...(input.quality === undefined ? {} : { quality: input.quality }),
       ...(input.editExtra ?? {}),
+      ...(input.extraBody ?? {}),
     }
     const response = await fetch(imageEndpoint(input.baseURL, 'edits'), {
       method: 'POST', redirect: 'error', signal: input.signal,
@@ -98,6 +135,8 @@ export async function editOpenAICompatibleImage(input: {
     form.append('model', input.model)
     form.append('prompt', input.prompt)
     if (input.size !== undefined && input.size.length > 0) form.append('size', input.size)
+    if (input.quality !== undefined) form.append('quality', input.quality)
+    for (const [key, value] of Object.entries(input.extraBody ?? {})) form.append(key, String(value))
     form.append('response_format', 'b64_json')
     form.append('reference_images', JSON.stringify(input.sourceImages.map(sourceImage => Buffer.from(sourceImage.data).toString('base64'))))
     const response = await fetch(imageEndpoint(input.baseURL, 'edits'), {
@@ -118,6 +157,8 @@ export async function editOpenAICompatibleImage(input: {
   form.append('prompt', input.prompt)
   form.append('model', input.model)
   if (input.size !== undefined && input.size.length > 0) form.append('size', input.size)
+  if (input.quality !== undefined) form.append('quality', input.quality)
+  for (const [key, value] of Object.entries(input.extraBody ?? {})) form.append(key, String(value))
 
   const response = await fetch(imageEndpoint(input.baseURL, 'edits'), {
     method: 'POST', redirect: 'error', signal: input.signal,

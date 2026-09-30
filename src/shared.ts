@@ -462,7 +462,7 @@ export function mergeComfyUIPrompt(preset: string | undefined, user: string): st
 export const DEFAULT_SUBSCRIPTION_MODELS: Record<SubscriptionProvider, string> = {
   'chatgpt-sub': 'gpt-image-2.5-flare',
   'grok-sub': 'grok-imagine-image-2.0',
-  'google-sub': 'gemini-3-pro-image',
+  'google-sub': 'gemini-3.1-flash-image',
 }
 
 export const DEFAULT_MODELS: Record<ImageProvider, string> = {

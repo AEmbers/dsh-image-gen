@@ -1,4 +1,4 @@
-import { imageResultFromMeta, imageResultFromPtcDispatch } from '../image-result-node.js'
+import { imageResultsFromMeta, imageResultsFromPtcDispatch } from '../image-result-node.js'
 import { pushTlLandingsLive } from './tl-canvas-bridge.js'
 
 interface EventEntry {
@@ -43,17 +43,17 @@ export function startConversationLandings(sessions: CanvasSessions): () => void 
         const isNew = event.seq > lastSeq
         lastSeq = Math.max(lastSeq, event.seq)
         if (change.kind !== 'append' || !isNew) continue
-        const result = event.type === 'tool/result'
-          ? imageResultFromMeta(event.data.meta) : imageResultFromPtcDispatch(event)
-        if (result === undefined) continue
-        pushTlLandingsLive([{
+        const results = event.type === 'tool/result'
+          ? imageResultsFromMeta(event.data.meta) : imageResultsFromPtcDispatch(event)
+        if (results.length === 0) continue
+        pushTlLandingsLive(results.map(result => ({
           galleryId: String(result.attachment.attachmentId),
           attachment: result.attachment,
           fromConversation: true,
           prompt: result.prompt,
           provider: result.provider,
           model: result.model,
-        }])
+        })))
       }
     })
   }

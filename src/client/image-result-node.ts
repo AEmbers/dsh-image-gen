@@ -1,4 +1,4 @@
-/** Modern DSH conversation node that keeps completed image artifacts outside Compact process folding. */
+/** Modern DSH conversation node that keeps image artifacts outside Tool process folding. */
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 
 export const IMAGE_RESULT_NODE_KIND = 'dsh-image-result'
@@ -20,8 +20,6 @@ interface ImageResultState {
   /** Owning conversation turn; PTC (run_code) sub-call results carry no turn. */
   readonly turn?: number
   readonly results: readonly (ImageResultPresentation & { readonly seq: number })[]
-  readonly answerSeq?: number
-  readonly endSeq?: number
 }
 
 interface EventLike {
@@ -52,97 +50,74 @@ interface ConversationNodeDefinitionLike<State> {
   buildViewNode(context: ContextLike<State>): Record<string, unknown> | null
 }
 
-/** Options controlling where the artifact anchors as its Turn progresses. */
-export interface ImageResultNodeOptions {
-  /**
-   * Whether the host transcript view folds completed-Turn process content
-   * (Compact mode). Omission or a thrown/unavailable read falls back to
-   * Compact-safe anchoring, which keeps the artifact always visible.
-   */
-  readonly isCompactTranscript?: () => boolean
-}
-
-/** Default definition: unknown transcript mode falls back to Compact-safe anchoring. */
+/** Default definition for the successful images from each Tool invocation. */
 export const imageResultDefinition: ConversationNodeDefinitionLike<ImageResultState> =
   createImageResultDefinition()
 
 /**
- * One image result row per Turn, anchored at its own tool/result position while
- * the Turn runs, then optionally re-anchored beside the final answer once the
- * Turn closes (only needed under the folding Compact transcript view).
+ * Give each image Tool result its own Chat row at the event that produced it.
+ * PTC (run_code) sub-calls already have their own stable sub-call identity.
  */
-export function createImageResultDefinition(
-  options: ImageResultNodeOptions = {},
-): ConversationNodeDefinitionLike<ImageResultState> {
+export function createImageResultDefinition(): ConversationNodeDefinitionLike<ImageResultState> {
   return {
     kind: IMAGE_RESULT_NODE_KIND,
     target: 'chat',
     match: (event) => {
-      // PTC (run_code) sub-calls carry neither a turn nor presentationMeta, so
-      // they cannot join the turn-keyed flow. A successful dispatch of our own
-      // image tools becomes its own node keyed by the sub-call (#38).
+      // PTC (run_code) sub-calls carry neither a turn nor presentationMeta.
+      // A successful dispatch of our image tools becomes its own node keyed
+      // by the sub-call (#38).
       if (event.type === 'tool/ptc-dispatch') {
         const subCallId = event.data.subCallId
         if (typeof subCallId !== 'string' || subCallId === '') return null
-        return imageResultFromPtcDispatch(event) === undefined
+        return imageResultsFromPtcDispatch(event).length === 0
           ? null
           : { id: `ptc:${subCallId}`, role: 'start' }
       }
-      const turn = eventTurn(event)
-      if (turn === undefined) return null
-      if (event.type === 'turn/start') return { id: String(turn), role: 'start' }
-      if (event.type === 'turn/end') return { id: String(turn), role: 'update' }
-      if (event.type === 'assistant/message') return { id: String(turn), role: 'update' }
-      if (event.type === 'tool/result' && imageResultFromMeta(event.data.meta) !== undefined) {
-        return { id: String(turn), role: 'update' }
+      if (event.type === 'tool/result'
+        && eventTurn(event) !== undefined
+        && imageResultsFromMeta(event.data.meta).length > 0) {
+        return { id: `result:${event.seq}`, role: 'start' }
       }
       return null
     },
     start: (_context, match) => {
       if (match.event.type === 'tool/ptc-dispatch') {
-        const result = imageResultFromPtcDispatch(match.event)
-        if (result === undefined) throw new Error('dsh-image-result start requires a plugin image dispatch')
-        return { results: [{ ...result, seq: match.event.seq }] }
+        const results = imageResultsFromPtcDispatch(match.event)
+        if (results.length === 0) throw new Error('dsh-image-result start requires a plugin image dispatch')
+        return { results: results.map(result => ({ ...result, seq: match.event.seq })) }
       }
       const turn = eventTurn(match.event)
-      if (match.event.type !== 'turn/start' || turn === undefined) {
-        throw new Error('dsh-image-result start requires turn/start')
+      const results = match.event.type === 'tool/result'
+        ? imageResultsFromMeta(match.event.data.meta)
+        : []
+      if (turn === undefined || results.length === 0) {
+        throw new Error('dsh-image-result start requires an image Tool result')
       }
-      return { turn, results: [] }
+      return { turn, results: results.map(result => ({ ...result, seq: match.event.seq })) }
     },
     update: (context, match) => {
-      if (match.event.type === 'turn/end') return { ...context.state, endSeq: match.event.seq }
-      if (match.event.type === 'assistant/message') return { ...context.state, answerSeq: match.event.seq }
-      if (match.event.type === 'tool/ptc-dispatch') {
-        // Defensive merge: a re-dispatch of the same sub-call must not duplicate.
-        const result = imageResultFromPtcDispatch(match.event)
-        return result === undefined ? context.state : appendResult(context.state, result, match.event.seq)
-      }
-      if (match.event.type !== 'tool/result') return context.state
-      const result = imageResultFromMeta(match.event.data.meta)
-      if (result === undefined) return context.state
-      return appendResult(context.state, result, match.event.seq)
+      if (match.event.type !== 'tool/ptc-dispatch') return context.state
+      // Defensive merge: a re-dispatch of the same sub-call must not duplicate.
+      return imageResultsFromPtcDispatch(match.event).reduce(
+        (state, result) => appendResult(state, result, match.event.seq), context.state,
+      )
     },
     buildViewNode: (context) => {
       const state = context.state
-      const last = state?.results.at(-1)
-      if (state === undefined || last === undefined) return null
-      const location = context.matches.at(-1)?.location ?? context.start?.location ?? { kind: 'unresolved' }
+      const first = state?.results[0]
+      if (state === undefined || first === undefined) return null
       return {
         key: context.key,
         kind: IMAGE_RESULT_NODE_KIND,
         id: context.id,
         target: 'chat',
-        // While the Turn is open the artifact stays at its own tool/result
-        // position, so later messages in the same Turn order below it. Once the
-        // Turn closes, Compact folds every node before the finalized answer
-        // boundary, so the artifact re-anchors beside that answer to stay
-        // visible; Normal mode has no folding and keeps the natural position.
-        // An unknown transcript mode falls back to the Compact-safe behavior.
-        anchorSeq: state.endSeq !== undefined && compactTranscript(options)
-          ? state.answerSeq ?? state.endSeq ?? last.seq
-          : last.seq,
-        location,
+        // Keep the result at the event that produced it, even after the Turn
+        // ends or later images arrive in that same Turn.
+        anchorSeq: first.seq,
+        // Chat groups every turn-located custom node into Tool process, even
+        // when its anchor is beside the answer. A session-located result is a
+        // direct Chat row and remains visible when that process folds (#65).
+        location: { kind: 'session' },
         visibility: 'visible',
         data: {
           ...(state.turn !== undefined ? { turn: state.turn } : {}),
@@ -165,14 +140,6 @@ function appendResult(
   return { ...state, results: [...state.results, { ...result, seq }] }
 }
 
-function compactTranscript(options: ImageResultNodeOptions): boolean {
-  try {
-    return options.isCompactTranscript?.() ?? true
-  } catch {
-    return true
-  }
-}
-
 /** Parse the plugin-owned durable presentation metadata from a Tool result event. */
 export function imageResultFromMeta(value: unknown): ImageResultPresentation | undefined {
   const meta = record(value)
@@ -190,13 +157,26 @@ export function imageResultFromMeta(value: unknown): ImageResultPresentation | u
   }
 }
 
+/** Parse all successful images from either a single or batch Tool result. */
+export function imageResultsFromMeta(value: unknown): readonly ImageResultPresentation[] {
+  const meta = record(value)
+  if (meta?.kind === 'dsh-image-gen-batch' && Array.isArray(meta.images)) {
+    return meta.images.flatMap(image => {
+      const result = imageResultFromMeta(image)
+      return result === undefined ? [] : [result]
+    })
+  }
+  const result = imageResultFromMeta(value)
+  return result === undefined ? [] : [result]
+}
+
 function eventTurn(event: EventLike): number | undefined {
   const turn = event.data.turn
   return typeof turn === 'number' && Number.isSafeInteger(turn) && turn >= 0 ? turn : undefined
 }
 
 /** Plugin tools whose PTC (run_code) dispatch results are image results. */
-const PTC_IMAGE_TOOL_NAMES: ReadonlySet<string> = new Set(['generate_image', 'edit_image'])
+const PTC_IMAGE_TOOL_NAMES: ReadonlySet<string> = new Set(['generate_image', 'generate_images', 'edit_image'])
 
 /**
  * Fixed summary text rendered by the tools' imageOutput(). PTC dispatch events
@@ -215,36 +195,45 @@ const PTC_SAVED_TO_PATTERN = / It was also saved to the workspace as (.+)\. (?:(
  * anything that is not a successful image result from our own image tools.
  */
 export function imageResultFromPtcDispatch(event: EventLike): ImageResultPresentation | undefined {
-  if (event.type !== 'tool/ptc-dispatch') return undefined
+  return imageResultsFromPtcDispatch(event)[0]
+}
+
+/** Pair each rendered image with its own summary, including batches with failed items. */
+export function imageResultsFromPtcDispatch(event: EventLike): readonly ImageResultPresentation[] {
+  if (event.type !== 'tool/ptc-dispatch') return []
   const data = event.data
-  if (data.isError === true) return undefined
-  if (typeof data.name !== 'string' || !PTC_IMAGE_TOOL_NAMES.has(data.name)) return undefined
+  if (data.isError === true) return []
+  if (typeof data.name !== 'string' || !PTC_IMAGE_TOOL_NAMES.has(data.name)) return []
   const content = Array.isArray(data.content) ? data.content : []
-  let attachment: ImageAttachmentRef | undefined
+  const results: ImageResultPresentation[] = []
   let summaryText = ''
+  const args = record(data.arguments)
+  const sourceIds = sourceAttachmentIds(args)
   for (const block of content) {
     const candidate = record(block)
     if (candidate === undefined) continue
-    if (candidate.type === 'image' && attachment === undefined) {
-      attachment = imageAttachment(candidate.attachment)
-    } else if (candidate.type === 'text' && summaryText === '' && typeof candidate.text === 'string') {
+    if (candidate.type === 'text' && typeof candidate.text === 'string') {
       summaryText = candidate.text
+      continue
     }
+    if (candidate.type !== 'image') continue
+    const attachment = imageAttachment(candidate.attachment)
+    if (attachment === undefined) continue
+    const summary = PTC_SUMMARY_PATTERN.exec(summaryText)
+    const savedTo = PTC_SAVED_TO_PATTERN.exec(summaryText)?.[1]
+    const promptMarker = '\nImage prompt: '
+    const promptAt = data.name === 'generate_images' ? summaryText.indexOf(promptMarker) : -1
+    results.push({
+      attachment,
+      prompt: promptAt < 0 ? stringValue(args?.prompt, 'Generated Image') : summaryText.slice(promptAt + promptMarker.length),
+      provider: summary?.[1] ?? '',
+      model: summary?.[2] ?? '',
+      output: summary?.[3] ?? '',
+      ...(savedTo !== undefined ? { savedTo } : {}),
+      ...(sourceIds !== undefined ? { sourceAttachmentIds: sourceIds } : {}),
+    })
   }
-  if (attachment === undefined) return undefined
-  const summary = PTC_SUMMARY_PATTERN.exec(summaryText)
-  const savedTo = PTC_SAVED_TO_PATTERN.exec(summaryText)?.[1]
-  const args = record(data.arguments)
-  const sourceIds = sourceAttachmentIds(args)
-  return {
-    attachment,
-    prompt: stringValue(args?.prompt, 'Generated Image'),
-    provider: summary?.[1] ?? '',
-    model: summary?.[2] ?? '',
-    output: summary?.[3] ?? '',
-    ...(savedTo !== undefined ? { savedTo } : {}),
-    ...(sourceIds !== undefined ? { sourceAttachmentIds: sourceIds } : {}),
-  }
+  return results
 }
 
 /** Collect edit_image source attachment ids (single or list form) from dispatch arguments. */

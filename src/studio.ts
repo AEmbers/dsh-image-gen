@@ -33,24 +33,8 @@ import {
   type SubscriptionProvider,
 } from './shared.js'
 
-const RATIO_LABELS: Record<string, string> = {
-  auto: '自动',
-  '1:1': '1:1 方形',
-  '3:2': '3:2 横向',
-  '2:3': '2:3 肖像',
-  '4:3': '4:3 横向',
-  '3:4': '3:4 竖向',
-  '16:9': '16:9 宽屏',
-  '9:16': '9:16 竖屏',
-  '4:5': '4:5 肖像',
-  '5:4': '5:4 横向',
-  '3:1': '3:1 全景',
-  '1:3': '1:3 长条',
-  '21:9': '21:9 超宽',
-  '9:21': '9:21 超高',
-}
+import { CLOUD_CAPABILITIES, RATIO_LABELS, SUBSCRIPTION_CAPABILITIES } from './capabilities.js'
 
-/** Built-in OpenAI-shape size trio used when no relay table is configured. */
 const LEGACY_OPENAI_TABLE: Record<string, Record<string, string>> = {
   '1:1': { '1K': '1024x1024' },
   '3:2': { '1K': '1536x1024' },
@@ -184,19 +168,19 @@ function isStudioPreferred(preferred: string | undefined): preferred is NonNulla
     || preferred !== undefined && (SUBSCRIPTION_PROVIDERS as readonly string[]).includes(preferred)
 }
 
-/** Fixed parameter shape for subscription channels: one "channel default" pair. */
+/** Subscription profiles come from the shared capability table (see capabilities.ts). */
 function subscriptionStudioProfile(provider: SubscriptionProvider, signedIn: boolean): StudioProviderProfile {
-  const channelDefault = { value: 'auto', label: '通道默认' }
+  const cap = SUBSCRIPTION_CAPABILITIES[provider]
   return {
     provider,
     label: SUBSCRIPTION_DISPLAY_LABELS[provider],
     model: DEFAULT_SUBSCRIPTION_MODELS[provider],
     configured: signedIn,
     supportsEditing: true,
-    ratioOptions: [channelDefault],
-    qualityOptions: [channelDefault],
-    defaultRatio: 'auto',
-    defaultQuality: 'auto',
+    ratioOptions: cap.ratioOptions,
+    qualityOptions: cap.qualityOptions,
+    defaultRatio: cap.defaultRatio,
+    defaultQuality: cap.defaultQuality,
   }
 }
 
@@ -262,13 +246,22 @@ export async function generateFromStudio(
         : await generateGoogleImage({ apiKey: credential, endpoint: wired.endpoint, model: wired.model, prompt: input.prompt, aspectRatio, imageSize, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal })
       output = `${aspectRatio}, ${imageSize}`
     } else if (wired.provider === 'openai' || wired.provider === 'openai-compat' || wired.provider === 'xai' || wired.provider === 'zhipu') {
-      const size = wired.provider === 'openai-compat' ? openAIRequestSize(config, input.ratio, input.quality) : openAISize(input.ratio)
+      // openai-compat keeps its configured relay table; the others resolve via
+      // the capability table. xAI speaks aspect_ratio+resolution, not size.
+      const p = wired.provider
+      const size = p === 'openai-compat' ? openAIRequestSize(config, input.ratio, input.quality)
+        : p === 'xai' ? undefined
+        : CLOUD_CAPABILITIES[p].sizeFor?.(input.ratio, input.quality)
+      const quality = p === 'openai' ? (input.quality === 'auto' ? undefined : input.quality)
+        : p === 'zhipu' ? 'hd'
+        : undefined
+      const extraBody = p === 'xai' ? { aspect_ratio: input.ratio, resolution: input.quality } : undefined
       generated = input.mode === 'edit'
-        ? await editOpenAICompatibleImage({ apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, ...(wired.provider === 'openai-compat' ? { editFormat: wired.editFormat, editExtra: wired.editExtra } : {}) })
-        : await generateOpenAICompatibleImage({ provider: wired.provider, apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal })
-      output = size
+        ? await editOpenAICompatibleImage({ apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, sourceImages, ...(size === undefined ? {} : { size }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, ...(quality === undefined ? {} : { quality }), ...(extraBody === undefined ? {} : { extraBody }), ...(p === 'openai-compat' ? { editFormat: wired.editFormat, editExtra: wired.editExtra } : p === 'xai' ? { editFormat: 'xaiJson' as const } : {}) })
+        : await generateOpenAICompatibleImage({ provider: p, apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, ...(size === undefined ? {} : { size }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, ...(quality === undefined ? {} : { quality }), ...(extraBody === undefined ? {} : { extraBody }) })
+      output = size ?? `${input.ratio}, ${input.quality}`
     } else if (wired.provider === 'seedream') {
-      const size = input.quality
+      const size = CLOUD_CAPABILITIES.seedream.sizeFor?.(input.ratio, input.quality) ?? input.quality
       generated = input.mode === 'edit'
         ? await editSeedreamImage({ apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, arkOptions: wired.arkOptions })
         : await generateOpenAICompatibleImage({ provider: 'seedream', apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, arkOptions: wired.arkOptions })
@@ -277,7 +270,7 @@ export async function generateFromStudio(
       if (input.mode === 'edit' && sourceImages.length > 3) {
         throw new Error('DashScope (通义万相) 图生图目前最多支持 3 张参考图，请精简后重试')
       }
-      const size = dashScopeSize(input.ratio)
+      const size = CLOUD_CAPABILITIES.dashscope.sizeFor?.(input.ratio, input.quality) ?? '1024x1024'
       generated = input.mode === 'edit'
         ? await editDashScopeImage({ apiKey: credential, endpoint: wired.endpoint, model: wired.model, prompt: input.prompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal })
         : await generateDashScopeImage({ apiKey: credential, endpoint: wired.endpoint, model: wired.model, prompt: input.prompt, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal })
@@ -408,11 +401,23 @@ async function generateSubscriptionFromStudio(
     : []
   const startedAt = Date.now()
   const count = input.count ?? 1
+  // Resolve the channel's wire parameters from the capability table: codex
+  // takes pixel sizes, grok/antigravity take the ratio string itself (their
+  // manager layers map it onto aspect_ratio / imageConfig). `auto` quality is
+  // never forwarded so the vendor default applies.
+  const subCap = SUBSCRIPTION_CAPABILITIES[provider]
+  const wireSize = provider === 'chatgpt-sub' ? subCap.sizeFor?.(input.ratio, input.quality) : input.ratio
+  const wireQuality = input.quality === 'auto' || input.quality === 'standard' ? undefined : input.quality
+  const requestedOutput = input.ratio === 'auto' && wireQuality === undefined
+    ? '通道默认'
+    : `${input.ratio}, ${input.quality}`
   const generateSingle = async (index: number): Promise<StudioGeneratedItem> => {
     const generated = await generateSubscriptionImage({
       manager: subscriptions,
       provider,
       prompt: input.prompt,
+      ...(wireSize === undefined || wireSize.length === 0 ? {} : { size: wireSize }),
+      ...(wireQuality === undefined ? {} : { quality: wireQuality }),
       ...(sourceImages.length > 0 ? { sourceImages } : {}),
       maxBytes: ctx.attachments.imageLimits.maxImageBytes,
       signal,
@@ -427,7 +432,7 @@ async function generateSubscriptionFromStudio(
     })
     return {
       attachment,
-      output: '通道默认',
+      output: subscriptionOutput(input.ratio, input.quality, requestedOutput, attachment.width, attachment.height, generated.reportedQuality),
     }
   }
   if (count === 1) {
@@ -448,6 +453,18 @@ async function generateSubscriptionFromStudio(
   }
   const first = successes[0]!
   return subscriptionResponse(input, startedAt, count, errors.length, successes, first, errors)
+}
+
+/** Describe what the subscription returned without presenting requested settings as actual output. */
+function subscriptionOutput(ratio: string, quality: string, fallback: string, width: number | undefined, height: number | undefined, reportedQuality?: string): string {
+  const qualityReport = reportedQuality === undefined ? '' : ` · 服务端回报清晰度 ${reportedQuality}`
+  if (width === undefined || height === undefined || width <= 0 || height <= 0) return `${fallback}${qualityReport}`
+  const actual = `实际 ${String(width)}×${String(height)}`
+  if (ratio === 'auto') return `请求 ${ratio}, ${quality}${qualityReport} · ${actual}`
+  const parts = ratio.split(':').map(Number)
+  const requested = (parts.length === 2 && parts[0]! > 0 && parts[1]! > 0) ? parts[0]! / parts[1]! : undefined
+  const mismatch = requested !== undefined && Math.abs((width / height) / requested - 1) > 0.12
+  return `请求 ${ratio}, ${quality}${qualityReport} · ${actual}${mismatch ? '（比例未生效）' : ''}`
 }
 
 /** Assemble the subscription workbench response with exactOptionalPropertyTypes-safe spreads. */
@@ -488,7 +505,8 @@ export function studioProfile(config: Config, provider: CloudImageProvider, conf
   if (active.provider === 'comfyui') throw new Error('Invalid cloud provider profile')
   const model = active.model
   if (provider === 'google') {
-    return profile(provider, model, configured, ASPECT_RATIOS.map(option), IMAGE_SIZES.map(value => ({ value, label: value })), '1:1', '1K')
+    const cap = CLOUD_CAPABILITIES.google
+    return profile(provider, model, configured, cap.ratioOptions, cap.qualityOptions, cap.defaultRatio, cap.defaultQuality)
   }
   if (provider === 'openai-compat') {
     // Empty table keeps the historical profile (quality `standard`) so
@@ -498,13 +516,9 @@ export function studioProfile(config: Config, provider: CloudImageProvider, conf
     }
     return openAICompatStudioProfile(config, model, configured)
   }
-  if (provider === 'openai' || provider === 'xai' || provider === 'zhipu') {
-    return profile(provider, model, configured, ['1:1', '3:2', '2:3'].map(option), [{ value: 'standard', label: '标准（推荐）' }], '1:1', 'standard')
-  }
-  if (provider === 'seedream') {
-    return profile(provider, model, configured, [{ value: 'auto', label: '模型自动' }], ['1K', '2K', '4K'].map(value => ({ value, label: value })), 'auto', '2K')
-  }
-  return profile(provider, model, configured, ['1:1', '3:2', '2:3', '16:9', '9:16'].map(option), [{ value: 'standard', label: '标准（推荐）' }], '1:1', 'standard')
+  // Every remaining cloud row reads its picker shape from the capability table.
+  const cap = CLOUD_CAPABILITIES[provider as Exclude<CloudImageProvider, 'openai-compat'>]
+  return profile(provider, model, configured, cap.ratioOptions, cap.qualityOptions, cap.defaultRatio, cap.defaultQuality)
 }
 
 function profile(
@@ -572,23 +586,6 @@ function decodeCanonicalBase64(value: string): Uint8Array {
   const data = Buffer.from(value, 'base64')
   if (data.byteLength === 0 || data.toString('base64') !== value) throw new Error('参考图编码无效')
   return new Uint8Array(data)
-}
-
-function openAISize(ratio: string): string {
-  if (ratio === '3:2') return '1536x1024'
-  if (ratio === '2:3') return '1024x1536'
-  return '1024x1024'
-}
-
-function dashScopeSize(ratio: string): string {
-  const sizes: Record<string, string> = {
-    '1:1': '1024*1024',
-    '3:2': '1536*1024',
-    '2:3': '1024*1536',
-    '16:9': '1664*928',
-    '9:16': '928*1664',
-  }
-  return sizes[ratio] ?? '1024*1024'
 }
 
 function cloudProvider(value: string): value is CloudImageProvider {

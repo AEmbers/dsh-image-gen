@@ -4,6 +4,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { apply } from '../src/index.js'
+import { createImageResultDefinition } from '../src/client/image-result-node.js'
 
 function attachment(id: string): ImageAttachmentRef {
   return {
@@ -505,6 +506,58 @@ describe('image tool registration', () => {
     await expect(tool.execute({ prompts: [] }, { signal: new AbortController().signal } as never)).rejects.toThrow('at least one prompt')
     await expect(tool.execute({ prompts: Array.from({ length: 11 }, () => 'p') }, { signal: new AbortController().signal } as never)).rejects.toThrow('at most 10')
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('displays every successful batch image through native and PTC conversation results', () => {
+    const { ctx, tools } = harnessContext()
+    apply(ctx, { provider: 'google', saveToWorkspace: false })
+    const tool = toolByName(tools, 'generate_images')
+    const prompts = ['first prompt', 'failed prompt', 'last prompt']
+    const images = [
+      { attachment: attachment('sha256:first'), prompt: prompts[0], provider: 'google', model: 'gemini', output: '2:3', savedTo: 'images/first.png' },
+      { attachment: attachment('sha256:last'), prompt: prompts[2], provider: 'google', model: 'gemini', output: '2:3' },
+    ]
+    const value = { images, failures: [{ index: 1, prompt: prompts[1], error: 'quota' }] }
+    const content = tool.output.render({ prompts }, value as never)
+    expect(content.filter(block => block.type === 'image')).toEqual(images.map(image => ({ type: 'image', attachment: image.attachment })))
+    const meta = tool.output.presentationMeta?.({ prompts }, value as never)
+    expect(meta).toMatchObject({ kind: 'dsh-image-gen-batch', images })
+
+    const definition = createImageResultDefinition()
+    const native = { type: 'tool/result', seq: 10, data: { turn: 1, meta } }
+    const ptc = { type: 'tool/ptc-dispatch', seq: 11, data: {
+      name: 'generate_images', subCallId: 'batch-1', arguments: { prompts }, isError: false, content,
+    } }
+    for (const event of [native, ptc]) {
+      const identity = definition.match(event)
+      expect(identity).toMatchObject({ role: 'start' })
+      const match = { event, location: { kind: 'session' } }
+      const context = { key: `images:${identity!.id}`, id: identity!.id, matches: [match] }
+      const state = definition.start(context, match, {})
+      expect(definition.buildViewNode({ ...context, state })).toMatchObject({
+        anchorSeq: event.seq, location: { kind: 'session' }, data: { results: images },
+      })
+    }
+    expect(tool.presentResult?.({ prompts }, { meta } as never)).toMatchObject({
+      card: 'generic', content: images.map(image => ({ type: 'image', attachment: image.attachment })),
+    })
+  })
+
+  it('reports an all-failed batch without publishing an empty image card', () => {
+    const { ctx, tools } = harnessContext()
+    apply(ctx, { provider: 'google', saveToWorkspace: false })
+    const tool = toolByName(tools, 'generate_images')
+    const args = { prompts: ['failed prompt'] }
+    const value = { images: [], failures: [{ index: 0, prompt: 'failed prompt', error: 'quota' }] }
+    const content = tool.output.render(args, value as never)
+    expect(content).toEqual([{ type: 'text', text: expect.stringContaining('failed: quota') }])
+    const meta = tool.output.presentationMeta?.(args, value as never)
+    const definition = createImageResultDefinition()
+    expect(definition.match({ type: 'tool/result', seq: 10, data: { turn: 1, meta } })).toBeNull()
+    expect(definition.match({ type: 'tool/ptc-dispatch', seq: 11, data: {
+      name: 'generate_images', subCallId: 'batch-1', arguments: args, isError: false, content,
+    } })).toBeNull()
+    expect(tool.presentResult?.(args, { meta } as never)).toBeUndefined()
   })
 
   it('honours a per-call provider override without touching the saved config', async () => {

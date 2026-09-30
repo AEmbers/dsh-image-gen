@@ -36,7 +36,7 @@ import { DELETE_ROUTE, SAVE_WORKSPACE_ROUTE, STUDIO_ROUTE, isSubscriptionProvide
 import { deleteGalleryItem, getGalleryItems, saveGalleryItem, subscribeGallery, toggleFavoriteGalleryItem, type GalleryItem, saveFavoritePrompt, getFavoritePrompts, deleteFavoritePrompt, subscribeFavorites, addFavoriteFolder, getFavoriteFolders, deleteFavoriteFolder, moveFavoritePrompt, updateFavoritePrompt, type FavoritePrompt, type FavoriteFolder } from './gallery-store.js'
 import { evictAttachmentCache, fetchAttachmentBlob } from './image-cache.js'
 import { copyImageBlob, downloadBlobUrl, formatRelativeTime } from './browser-image-utils.js'
-import { buildComparisonTargets, initialComparisonProviders } from './multi-model-compare.js'
+import { buildComparisonTargets, comparisonOptionUnion, initialComparisonProviders } from './multi-model-compare.js'
 import { clearStudioTlCanvases, StudioTlCanvas } from './tl/studio-tl-canvas.js'
 import { pushTlLandings } from './tl/tl-canvas-bridge.js'
 import type { LocaleService } from './gallery-view.js'
@@ -68,7 +68,7 @@ const COPY = {
     favPromptApplied: '已填入提示词', favRefApplied: '已加入参考图', favSaveFailed: '收藏失败，请重试',
     generate: '文生图', edit: '图生图', reference: '参考图', optional: '选填', upload: '点击或拖拽图片到此处',
     uploadHint: '支持 JPG / PNG / WebP / GIF，最大 10MB（最多 5 张）', prompt: '提示词 Prompt', clear: '清空', promptPlaceholder: '描述主体、构图、风格、光线与需要出现的文字…（支持 Ctrl+Enter 快捷生成）',
-    provider: 'Provider', model: 'Model', ratio: '比例', quality: '清晰度', start: '开始生成', generating: '正在生成…', cancelGenerate: '取消生成',
+    provider: 'Provider', model: 'Model', ratio: '比例', quality: '清晰度', subscriptionParameterHint: '所选比例会自动补充到生成提示词中；实际尺寸和清晰度仍由 ChatGPT 决定，请以生成结果为准。', subscriptionRatioMismatch: 'ChatGPT 订阅未按所选比例出图，请查看实际尺寸。', start: '开始生成', generating: '正在生成…', cancelGenerate: '取消生成',
     count: '生成数量', countUnit: '{n} 张', partialSuccess: '已生成 {success} 张图片，{failed} 张失败', generatingCount: '正在生成（共 {count} 张）…',
     batchResult: '本次生成（共 {count} 张）',
     singleModel: '单模型', compareModels: '多模型对比', compareHint: '相同提示词，同时交给多个模型', compareSelect: '选择模型', compareSelected: '已选 {count} 个模型',
@@ -106,7 +106,7 @@ const COPY = {
     favPromptApplied: 'Prompt applied', favRefApplied: 'Reference added', favSaveFailed: 'Could not save; please retry',
     generate: 'Text to image', edit: 'Image to image', reference: 'Reference image', optional: 'optional', upload: 'Click or drop images here',
     uploadHint: 'JPG / PNG / WebP / GIF, up to 10MB (max 5)', prompt: 'Prompt', clear: 'Clear', promptPlaceholder: 'Describe the subject, composition, style, lighting, and exact text… (Ctrl+Enter to generate)',
-    provider: 'Provider', model: 'Model', ratio: 'Aspect ratio', quality: 'Quality', start: 'Generate', generating: 'Generating…', cancelGenerate: 'Cancel',
+    provider: 'Provider', model: 'Model', ratio: 'Aspect ratio', quality: 'Quality', subscriptionParameterHint: 'The selected aspect ratio is automatically added to the generation prompt. ChatGPT still determines the final dimensions and quality; check the generated result.', subscriptionRatioMismatch: 'ChatGPT subscription returned a different aspect ratio. Check the actual dimensions.', start: 'Generate', generating: 'Generating…', cancelGenerate: 'Cancel',
     count: 'Number of images', countUnit: '{n}', partialSuccess: 'Generated {success} images, {failed} failed', generatingCount: 'Generating ({count} images)…',
     batchResult: 'Generated {count} images',
     singleModel: 'Single model', compareModels: 'Compare models', compareHint: 'Send the same prompt to multiple models', compareSelect: 'Choose models', compareSelected: '{count} models selected',
@@ -303,16 +303,6 @@ export const StudioView: FC<{
   const referencesRef = useRef(references)
   referencesRef.current = references
 
-  // Parameter locking for the comparison view: only when every selected model
-  // is a subscription channel (channel-default parameters only) do the shared
-  // ratio/quality controls step aside; a mixed selection keeps user-chosen
-  // parameters for the API rows while subscription rows use channel defaults.
-  const comparisonSelectionsAllSubscription = comparisonEnabled
-    && comparisonProviders.length > 0
-    && comparisonProviders.every(provider => isSubscriptionProvider(provider))
-  // Single-model view: a subscription provider has no parameter matrix at all.
-  const singleProviderIsSubscription = !comparisonEnabled && isSubscriptionProvider(provider)
-
   const t = (key: CopyKey, values?: Record<string, string>): string => {
     let text: string = COPY[lang][key]
     for (const [name, value] of Object.entries(values ?? {})) text = text.replace(`{${name}}`, value)
@@ -500,6 +490,14 @@ export const StudioView: FC<{
   const comparisonTargets = useMemo(
     () => buildComparisonTargets(comparisonProfiles, comparisonProviders, ratio, quality),
     [comparisonProfiles, comparisonProviders, ratio, quality],
+  )
+  const comparisonRatioOpts = useMemo(
+    () => localizeRatioOptions(comparisonOptionUnion(comparisonProfiles, 'ratioOptions'), lang),
+    [comparisonProfiles, lang],
+  )
+  const comparisonQualityOpts = useMemo(
+    () => localizeQualityOptions(comparisonOptionUnion(comparisonProfiles, 'qualityOptions'), lang),
+    [comparisonProfiles, lang],
   )
 
   const applyProvider = (profile: StudioProviderProfile) => {
@@ -890,6 +888,7 @@ export const StudioView: FC<{
           })))
         }
         if (failed > 0) flash(t('comparePartial', { success: String(successes.length), failed: String(failed) }))
+        else if (galleryEntries.some(hasSubscriptionRatioMismatch)) flash(t('subscriptionRatioMismatch'))
         return
       }
 
@@ -959,6 +958,8 @@ export const StudioView: FC<{
 
       if (payload.failedCount && payload.failedCount > 0) {
         flash(t('partialSuccess', { success: String(generatedList.length), failed: String(payload.failedCount) }))
+      } else if (galleryEntries.some(hasSubscriptionRatioMismatch)) {
+        flash(t('subscriptionRatioMismatch'))
       }
     } catch (submitError) {
       if (controller.signal.aborted) {
@@ -1532,7 +1533,7 @@ export const StudioView: FC<{
                 <button type="button" onClick={() => setShowDeleteModal(true)}><Trash2 size={15} /><span>{t('remove')}</span></button>
               </div>
             </div>
-            <div className="dsh-ig-result-meta"><span>{formatRelativeTime(selected.createdAt, lang)}</span><span>{selected.provider}</span><span>{selected.model}</span><span>{selected.attachment.width && selected.attachment.height ? `${selected.attachment.width} × ${selected.attachment.height}` : '—'}</span></div>
+            <div className="dsh-ig-result-meta"><span>{formatRelativeTime(selected.createdAt, lang)}</span><span>{selected.provider}</span><span>{selected.model}</span><span>{selected.provider === 'chatgpt-sub' ? selected.output : selected.attachment.width && selected.attachment.height ? `${selected.attachment.width} × ${selected.attachment.height}` : '—'}</span>{hasSubscriptionRatioMismatch(selected) && <span>{t('subscriptionRatioMismatch')}</span>}</div>
           </>}
         </main>
 
@@ -1674,24 +1675,12 @@ export const StudioView: FC<{
                   </div>
                   <p>{t('compareParameterHint')}</p>
                 </div>
-                {comparisonSelectionsAllSubscription ? (
-                    <div className="dsh-ig-field-grid">
-                      <FieldSelect label={t('ratio')} value="auto" onChange={() => {}} options={[{ value: 'auto', label: lang === 'en' ? 'Channel default' : '通道默认' }]} />
-                      <FieldSelect label={t('quality')} value="auto" onChange={() => {}} options={[{ value: 'auto', label: lang === 'en' ? 'Channel default' : '通道默认' }]} />
-                    </div>
-                  ) : (
-                    <div className="dsh-ig-field-grid"><FieldSelect label={t('ratio')} value={ratio} onChange={setRatio} options={comparisonRatioOptions(lang)} /><FieldSelect label={t('quality')} value={quality} onChange={setQuality} options={comparisonQualityOptions(lang)} /></div>
-                  )}
+                <div className="dsh-ig-field-grid"><FieldSelect label={t('ratio')} value={ratio} onChange={setRatio} options={comparisonRatioOpts} /><FieldSelect label={t('quality')} value={quality} onChange={setQuality} options={comparisonQualityOpts} /></div>
+                {comparisonTargets.some(target => target.profile.provider === 'chatgpt-sub') && <div className="dsh-ig-inline-note">{t('subscriptionParameterHint')}</div>}
               </> : <>
                 <div className="dsh-ig-field-grid"><FieldSelect label={t('provider')} value={provider} onChange={changeProvider} options={config.providers.map(item => ({ value: item.provider, label: `${item.label}${item.configured ? '' : ` · ${t('unconfigured')}`}` }))} /><FieldSelect label={t('model')} value={model} onChange={setModel} options={activeProfile === undefined ? [] : [{ value: activeProfile.model, label: activeProfile.model }]} /></div>
-                {singleProviderIsSubscription ? (
-                  <div className="dsh-ig-field-grid">
-                    <FieldSelect label={t('ratio')} value="auto" onChange={() => {}} options={[{ value: 'auto', label: lang === 'en' ? 'Channel default' : '通道默认' }]} />
-                    <FieldSelect label={t('quality')} value="auto" onChange={() => {}} options={[{ value: 'auto', label: lang === 'en' ? 'Channel default' : '通道默认' }]} />
-                  </div>
-                ) : (
-                  <div className="dsh-ig-field-grid"><FieldSelect label={t('ratio')} value={ratio} onChange={setRatio} options={localizeRatioOptions(activeProfile?.ratioOptions ?? [], lang)} /><FieldSelect label={t('quality')} value={quality} onChange={setQuality} options={localizeQualityOptions(activeProfile?.qualityOptions ?? [], lang)} /></div>
-                )}
+                <div className="dsh-ig-field-grid"><FieldSelect label={t('ratio')} value={ratio} onChange={setRatio} options={localizeRatioOptions(activeProfile?.ratioOptions ?? [], lang)} /><FieldSelect label={t('quality')} value={quality} onChange={setQuality} options={localizeQualityOptions(activeProfile?.qualityOptions ?? [], lang)} /></div>
+                {provider === 'chatgpt-sub' && <div className="dsh-ig-inline-note">{t('subscriptionParameterHint')}</div>}
                 <div className="dsh-ig-field"><label>{t('count')}</label><div className="dsh-ig-count-row">{[1, 2, 3, 4].map(option => <button key={option} type="button" className={`dsh-ig-count-pill ${count === option ? 'is-active' : ''}`} onClick={() => setCount(option)}>{t('countUnit', { n: String(option) })}</button>)}</div></div>
               </>}
             </>}
@@ -1935,6 +1924,16 @@ const BatchCanvasItem: FC<{
   )
 }
 
+function hasSubscriptionRatioMismatch(item: GalleryItem): boolean {
+  if (item.provider !== 'chatgpt-sub' || item.aspectRatio === 'auto') return false
+  const width = item.attachment.width
+  const height = item.attachment.height
+  if (width === undefined || height === undefined || width <= 0 || height <= 0) return false
+  const parts = item.aspectRatio?.split(':').map(Number)
+  if (parts === undefined || parts.length !== 2 || !(parts[0]! > 0) || !(parts[1]! > 0)) return false
+  return Math.abs((width / height) / (parts[0]! / parts[1]!) - 1) > 0.12
+}
+
 const FieldSelect: FC<{ label: string; value: string; options: Array<{ value: string; label: string }>; onChange(value: string): void }> = ({ label, value, options, onChange }) => <label className="dsh-ig-field-select"><span>{label}</span><select value={value} onChange={event => onChange(event.target.value)}>{options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
 
 const LOCALIZED_RATIOS: Record<string, { zh: string; en: string }> = {
@@ -1944,13 +1943,22 @@ const LOCALIZED_RATIOS: Record<string, { zh: string; en: string }> = {
   '2:3': { zh: '2:3 肖像', en: '2:3 Portrait' },
   '4:3': { zh: '4:3 横向', en: '4:3 Landscape' },
   '3:4': { zh: '3:4 竖向', en: '3:4 Portrait' },
+  '4:5': { zh: '4:5 肖像', en: '4:5 Portrait' },
+  '5:4': { zh: '5:4 横向', en: '5:4 Landscape' },
   '16:9': { zh: '16:9 宽屏', en: '16:9 Widescreen' },
   '9:16': { zh: '9:16 竖屏', en: '9:16 Portrait' },
+  '21:9': { zh: '21:9 超宽', en: '21:9 Ultrawide' },
 }
 
 const LOCALIZED_QUALITIES: Record<string, { zh: string; en: string }> = {
   standard: { zh: '标准（推荐）', en: 'Standard (Recommended)' },
-  auto: { zh: '模型自动', en: 'Model Auto' },
+  auto: { zh: '自动', en: 'Auto' },
+  low: { zh: '低（快速）', en: 'Low (Fast)' },
+  medium: { zh: '中', en: 'Medium' },
+  high: { zh: '高', en: 'High' },
+  xhigh: { zh: '超高', en: 'Extra High' },
+  max: { zh: '最高', en: 'Max' },
+  hd: { zh: '高清', en: 'HD' },
 }
 
 function localizeRatioOptions(options: Array<{ value: string; label: string }>, lang: 'zh' | 'en'): Array<{ value: string; label: string }> {
@@ -1965,22 +1973,6 @@ function localizeQualityOptions(options: Array<{ value: string; label: string }>
     value: opt.value,
     label: LOCALIZED_QUALITIES[opt.value]?.[lang] ?? opt.label,
   }))
-}
-
-function comparisonRatioOptions(lang: 'zh' | 'en'): Array<{ value: string; label: string }> {
-  return ['1:1', '3:2', '2:3', '16:9', '9:16'].map(value => ({
-    value,
-    label: LOCALIZED_RATIOS[value]?.[lang] ?? value,
-  }))
-}
-
-function comparisonQualityOptions(lang: 'zh' | 'en'): Array<{ value: string; label: string }> {
-  return [
-    { value: 'standard', label: lang === 'zh' ? '标准' : 'Standard' },
-    { value: '1K', label: '1K' },
-    { value: '2K', label: '2K' },
-    { value: '4K', label: '4K' },
-  ]
 }
 
 const RecentItem: FC<{ item: GalleryItem; active: boolean; onClick(): void }> = ({ item, active, onClick }) => {
