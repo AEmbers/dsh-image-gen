@@ -18,6 +18,11 @@ const host: UserConfig = {
   fixedExtension: false,
   dts: false,
   clean: false,
+  // The host half must not resolve anything at runtime. DSH profiles install
+  // plugins with `autoInstallPeers: false`, and a git-hosted install keeps its
+  // own isolated store whose relative symlinks Node's ESM resolver cannot stat
+  // on Windows (EPERM), so a bare peer import makes the entry fail to load.
+  noExternal: ['@deepseek-ai/cordis', '@deepseek-ai/schemastery'],
 }
 
 const client: UserConfig = {
