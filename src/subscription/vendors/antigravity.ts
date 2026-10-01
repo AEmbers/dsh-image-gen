@@ -16,6 +16,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { buildAuthorizeUrl, formTokenRequest, type Pkce } from '../oauth.js'
+import { subscriptionFetch } from '../proxy.js'
 import type { SubscriptionBlob } from '../blob.js'
 import { DEFAULT_SUBSCRIPTION_MODELS } from '../../shared.js'
 
@@ -92,7 +93,7 @@ export async function initAntigravityVersion(): Promise<void> {
 
 async function fetchVersionText(url: string, maxChars?: number): Promise<string | undefined> {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(VERSION_FETCH_TIMEOUT_MS) })
+    const response = await subscriptionFetch(url, { signal: AbortSignal.timeout(VERSION_FETCH_TIMEOUT_MS) })
     if (!response.ok) return undefined
     let text = await response.text()
     if (maxChars !== undefined) text = text.slice(0, maxChars)
@@ -207,7 +208,7 @@ export async function antigravityExchangeCode(cfg: AntigravityConfig, pkce: Pkce
     code,
     redirect_uri: cfg.redirectUri,
     code_verifier: pkce.verifier,
-  }, fetch)
+  }, subscriptionFetch)
   const blob = tokenBlobFromOAuth(json)
   if (blob.accessToken.length === 0) throw new Error('Antigravity token endpoint returned no access token')
   return blob
@@ -219,7 +220,7 @@ export async function antigravityRefresh(blob: SubscriptionBlob): Promise<Subscr
     client_secret: ANTIGRAVITY_CLIENT_SECRET,
     grant_type: 'refresh_token',
     refresh_token: blob.refreshToken,
-  }, fetch)
+  }, subscriptionFetch)
   const next = tokenBlobFromOAuth(json)
   return {
     ...next,
@@ -241,7 +242,7 @@ export async function antigravityResolveProject(blob: SubscriptionBlob): Promise
   const metadata = { ideType: 'ANTIGRAVITY', platform: platformOf(), pluginType: 'GEMINI' }
   for (const base of LOAD_ENDPOINTS) {
     try {
-      const response = await fetch(`${base}/v1internal:loadCodeAssist`, {
+      const response = await subscriptionFetch(`${base}/v1internal:loadCodeAssist`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${blob.accessToken}`, ...loadHeaders('') },
         body: JSON.stringify({ metadata }),
@@ -346,7 +347,7 @@ export async function antigravityGenerateImage(options: {
     const timeoutSignal = AbortSignal.timeout(IMAGE_TIMEOUT_MS)
     const signal = options.signal !== undefined ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal
     try {
-      const response = await fetch(url, {
+      const response = await subscriptionFetch(url, {
         method: 'POST',
         headers: {
           ...contentHeaders(options.projectId),

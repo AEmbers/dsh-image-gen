@@ -7,6 +7,7 @@
  * (grok-cli token, not an xAI API key).
  */
 import { buildAuthorizeUrl, emailFromToken, formTokenRequest, type Pkce } from '../oauth.js'
+import { subscriptionFetch } from '../proxy.js'
 import type { SubscriptionBlob } from '../blob.js'
 
 const GROK_AUTH = 'https://auth.x.ai/oauth2/authorize'
@@ -72,7 +73,7 @@ export async function grokExchangeCode(cfg: { clientId: string; redirectUri: str
     code,
     redirect_uri: cfg.redirectUri,
     code_verifier: pkce.verifier,
-  }, fetch)
+  }, subscriptionFetch)
   const blob = tokenBlobFromOAuth(json)
   return { ...blob, email: blob.email.length > 0 ? blob.email : emailFromToken(blob.accessToken), label: 'Grok' }
 }
@@ -82,7 +83,7 @@ export async function grokRefresh(blob: SubscriptionBlob): Promise<SubscriptionB
     grant_type: 'refresh_token',
     client_id: GROK_CLIENT_ID,
     refresh_token: blob.refreshToken,
-  }, fetch)
+  }, subscriptionFetch)
   const next = tokenBlobFromOAuth(json)
   return {
     ...next,

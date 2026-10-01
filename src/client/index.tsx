@@ -120,6 +120,7 @@ interface ImageSettings {
   saveToWorkspace?: boolean
   workspaceFolder?: string
   showProviderPill?: boolean
+  subscriptionProxyUrl?: string
 }
 interface CredentialInfo { configured?: boolean; source?: string; writable?: boolean }
 interface CredentialResult { ok: boolean; value?: Readonly<Record<string, CredentialInfo>> }
@@ -204,7 +205,9 @@ const DICT = {
     subBadgeUnknown: '状态未知',
     subSectionTitle: '订阅生图',
     subHint: '通过已登录的订阅账号生图，无需 API Key。登录在你的授权下进行，不会修改任何 API Key 或默认 Provider。',
-    subProxyHint: '需要代理时，请在登录前开启代理软件的 TUN（虚拟网卡）模式。普通系统代理可能无法覆盖 DSH 后端请求，导致网页授权后登录失败。',
+    subProxyHint: '登录与订阅接口可以单独走一个代理，只影响这些请求，DSH 的其他网络访问不受影响；留空则直连。未填写时也可以改用代理软件的 TUN（虚拟网卡）模式。',
+  subProxyLabel: '订阅代理（可选）',
+  subProxySaved: '订阅代理已保存。',
     subAccountLabel: '账号',
     subAccountEmail: '已登录：{email}',
     subAccountNone: '未登录',
@@ -353,7 +356,9 @@ const DICT = {
     subBadgeUnknown: 'Unknown',
     subSectionTitle: 'Subscription generation',
     subHint: 'Generates through a logged-in subscription account; no API key needed. Signing in never changes any API key or the default provider.',
-    subProxyHint: 'If you need a proxy, enable TUN (virtual network adapter) mode before signing in. A system proxy alone may not cover DSH backend requests, causing sign-in to fail after browser authorization.',
+    subProxyHint: 'Sign-in and subscription calls can use a proxy of their own; only those requests are affected and everything else in DSH stays direct. Leave it blank to go direct, or enable TUN (virtual network adapter) mode instead.',
+  subProxyLabel: 'Subscription proxy (optional)',
+  subProxySaved: 'Subscription proxy saved.',
     subAccountLabel: 'Account',
     subAccountEmail: 'Signed in: {email}',
     subAccountNone: 'Not signed in',
@@ -1269,6 +1274,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
   const [saveToWorkspace, setSaveToWorkspace] = useState(() => props.scope.getSnapshot().value?.saveToWorkspace ?? true)
   const [workspaceFolder, setWorkspaceFolder] = useState(() => props.scope.getSnapshot().value?.workspaceFolder ?? 'dsh-image-gen')
   const [showPill, setShowPill] = useState(() => props.scope.getSnapshot().value?.showProviderPill === true)
+  const [subProxy, setSubProxy] = useState(() => props.scope.getSnapshot().value?.subscriptionProxyUrl ?? '')
   const [uiMessage, setUiMessage] = useState('')
   const [uiMessageIsError, setUiMessageIsError] = useState(false)
   const [workspaceMessage, setWorkspaceMessage] = useState('')
@@ -1434,6 +1440,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
     setSaveToWorkspace(value?.saveToWorkspace ?? true)
     setWorkspaceFolder(value?.workspaceFolder ?? 'dsh-image-gen')
     setShowPill(value?.showProviderPill === true)
+    setSubProxy(value?.subscriptionProxyUrl ?? '')
     setRows(current => {
       const next = {} as Record<Provider, ProviderRowState>
       for (const provider of IMAGE_PROVIDERS) {
@@ -1526,11 +1533,10 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
         await saveSetting('comfyuiWorkflowName', activeEntry === undefined ? '' : activeEntry.name)
         await saveSetting('comfyuiTimeoutMs', Math.max(1, Math.round(row.timeoutSeconds)) * 1000)
       } else if (isSubscriptionProvider(provider)) {
-        // Subscription rows persist nothing per-provider: the model is fixed
+        // Subscription rows persist only the shared proxy: the model is fixed
         // by the channel and the login lives in the plugin's own credential
-        // store. Saving is a no-op acknowledgement so the button never feels
-        // broken.
-        await Promise.resolve()
+        // store.
+        await saveSetting('subscriptionProxyUrl', subProxy.trim())
       } else {
         // Validate the compat edit extras BEFORE any write: a broken JSON
         // object must not half-save (model/baseURL persisted, extras rejected).
@@ -2016,6 +2022,8 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
             <span className="dsh-ig-label">{t('subSectionTitle')}</span>
             <p className="dsh-ig-hint">{t('subHint')}</p>
             <p className="dsh-ig-hint" role="note">{t('subProxyHint')}</p>
+            <input className="dsh-ig-input" type="text" value={subProxy} placeholder="http://127.0.0.1:10809" onChange={(event) => { setSubProxy(event.target.value) }} aria-label={t('subProxyLabel')} />
+            <span className="dsh-ig-hint">{t('subProxyLabel')}</span>
           </div>
           <div className="dsh-ig-field">
             <span className="dsh-ig-label">{t('subAccountLabel')}</span>

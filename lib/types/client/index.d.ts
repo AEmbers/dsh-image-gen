@@ -50,6 +50,7 @@ interface ImageSettings {
     saveToWorkspace?: boolean;
     workspaceFolder?: string;
     showProviderPill?: boolean;
+    subscriptionProxyUrl?: string;
 }
 interface CredentialInfo {
     configured?: boolean;

@@ -20,6 +20,7 @@ import { editOpenAICompatibleImage, generateOpenAICompatibleImage } from './open
 import { type ResolvedReferenceImage, resolveReferenceImages } from './reference-image.js'
 import { editSeedreamImage } from './seedream.js'
 import { generateSubscriptionImage, registerSubscriptionRoutes, subscriptionToolParameters, SubscriptionManager } from './subscription.js'
+import { setSubscriptionProxyResolver } from './subscription/proxy.js'
 import { CANVAS_STATE_ROUTE, IMAGE_GENERATION_NAMESPACE, IMAGE_PROVIDERS, IMPORT_ROUTE, INSPIRATION_ROUTE, STUDIO_ROUTE, TEST_CONNECTION_ROUTE, mergeComfyUIPrompt, type ImageProvider } from './shared.js'
 import { createInspirationRoute } from './inspiration-route.js'
 import { BUNDLED_INSPIRATION_CATALOG, searchInspirationCases } from './inspiration.js'
@@ -109,6 +110,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Subscription image accounts: login flows, blob storage, refresh, and the
   // vendor wire calls. One instance per application; tokens stay host-side.
   const subscriptionManager = new SubscriptionManager(ctx)
+  // Only the subscription calls may leave through a proxy; the URL is read from
+  // the live config on every request, so a settings edit lands without a reload.
+  setSubscriptionProxyResolver(() => current().subscriptionProxyUrl ?? '')
   registerSubscriptionRoutes(ctx, subscriptionManager)
 
   installImageSettings(ctx, current(), {

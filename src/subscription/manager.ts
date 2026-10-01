@@ -19,6 +19,7 @@ import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Context } from '@deepseek-ai/cordis'
 import { createPkce, type Pkce } from './oauth.js'
 import { startLoopback } from './loopback.js'
+import { subscriptionFetch } from './proxy.js'
 import { parseBlob, serializeBlob, type SubscriptionBlob } from './blob.js'
 import {
   CODEX_IMAGE_EDIT_URL,
@@ -294,7 +295,7 @@ export class SubscriptionManager {
       }
     }
 
-    const response = await fetch(url, {
+    const response = await subscriptionFetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),

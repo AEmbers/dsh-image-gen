@@ -157,6 +157,11 @@ export interface Config {
   workspaceFolder?: string
   /** Show the provider switcher beside the chat input. */
   showProviderPill?: boolean
+  /**
+   * HTTP proxy used by the subscription (OAuth + vendor API) calls only;
+   * empty keeps them direct. Everything else in the host stays untouched.
+   */
+  subscriptionProxyUrl?: string
 }
 
 /**
@@ -207,6 +212,7 @@ export const Config = z.object({
   saveToWorkspace: volatile(z.boolean().default(true)),
   workspaceFolder: volatile(z.string().default(DEFAULT_WORKSPACE_FOLDER)),
   showProviderPill: volatile(z.boolean().default(false)),
+  subscriptionProxyUrl: volatile(z.string().default('')),
 }) as unknown as z<Config>
 
 /** Resolve exactly one provider profile for a tool call. */

@@ -7,6 +7,7 @@
  * The device-code flow and chat streaming stay out of this bundle.
  */
 import { buildAuthorizeUrl, chatgptAccountId, emailFromToken, formTokenRequest, type Pkce } from '../oauth.js'
+import { subscriptionFetch } from '../proxy.js'
 import type { SubscriptionBlob } from '../blob.js'
 
 export const CODEX_AUTH = 'https://auth.openai.com/oauth/authorize'
@@ -94,7 +95,7 @@ export async function codexExchangeCode(cfg: CodexConfig, pkce: Pkce, code: stri
     code,
     redirect_uri: cfg.redirectUri,
     code_verifier: pkce.verifier,
-  }, fetch)
+  }, subscriptionFetch)
   return decorate(tokenBlobFromOAuth(json), json)
 }
 
@@ -103,7 +104,7 @@ export async function codexRefresh(blob: SubscriptionBlob): Promise<Subscription
     grant_type: 'refresh_token',
     client_id: CODEX_CLIENT_ID,
     refresh_token: blob.refreshToken,
-  }, fetch)
+  }, subscriptionFetch)
   const next = tokenBlobFromOAuth(json)
   return {
     ...next,

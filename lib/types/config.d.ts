@@ -85,6 +85,11 @@ export interface Config {
     workspaceFolder?: string;
     /** Show the provider switcher beside the chat input. */
     showProviderPill?: boolean;
+    /**
+     * HTTP proxy used by the subscription (OAuth + vendor API) calls only;
+     * empty keeps them direct. Everything else in the host stays untouched.
+     */
+    subscriptionProxyUrl?: string;
 }
 /**
  * Cordis configuration schema. Volatile marking happens per field (see
