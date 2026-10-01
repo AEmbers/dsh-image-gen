@@ -1379,7 +1379,10 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
       // The loopback catch window is 10 minutes; the poll set drops the row
       // earlier if it lands, and this expiry drops it if it never does.
       setSubPending(current => [...current.filter(entry => entry.provider !== provider), { provider, startedAt: Date.now() }])
-      window.open(payload.url, '_blank', 'noopener')
+      // A fixed window name per provider: a retry reuses that same tab instead
+      // of piling up one browser tab per attempt, while 'noopener' still keeps
+      // window.opener hidden from the vendor page.
+      window.open(payload.url, `dsh-image-gen-sub-${provider}`, 'noopener')
       updateRow(provider, { message: t('subWaitingLogin'), messageIsError: false })
     } catch (cause) {
       updateRow(provider, { message: cause instanceof Error ? cause.message : String(cause), messageIsError: true })
