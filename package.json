@@ -1,6 +1,6 @@
 {
   "name": "dsh-image-gen",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Bring ChatGPT-like image generation to DeepSeek Harness — Gemini, OpenAI, Seedream, DashScope, local ComfyUI & more.",
   "type": "module",
   "author": "shanliuling",
@@ -41,6 +41,14 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
+    "compatibility": {
+      "dsh": ">=0.2.0-rc.1 <0.3.0-0",
+      "dshReleases": {
+        "0.2.0-rc.1": "compatible",
+        "0.2.0-rc.2": "compatible",
+        "0.2.1-alpha.1": "compatible"
+      }
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-connection",
@@ -62,7 +70,8 @@
     "pack:check": "pnpm pack --dry-run"
   },
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0-rc.1 <0.3.0-0"
   },
   "license": "Apache-2.0",
   "keywords": [
@@ -88,8 +97,8 @@
     "cordis"
   ],
   "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4.0.0 <5",
-    "@deepseek-ai/schemastery": ">=3.18.0 <4",
+    "@deepseek-ai/cordis": ">=4.0.4 <5",
+    "@deepseek-ai/schemastery": ">=3.18.4 <4",
     "react": ">=18.2.0 <19"
   },
   "peerDependenciesMeta": {
