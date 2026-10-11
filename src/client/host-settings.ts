@@ -24,6 +24,15 @@ export const HOST_SETTINGS_CONFLICT = 'settings/conflict'
 export interface HostSettingsSnapshot<T> {
   value: T | undefined
   writable: boolean
+  /**
+   * Sync state the settings card reads to tell "no Host settings here" from
+   * "read-only". `unavailable` until a Remote settings namespace is adopted,
+   * and absent once one answered — the card then falls back to `writable`.
+   * This is the state DSH's own degraded scope reports, so a page this scope
+   * serves announces the same diagnosis as one the Host answered with an
+   * inert settings form.
+   */
+  status?: 'loading' | 'ready' | 'unavailable'
 }
 
 /** Settings scope shape both surfaces consume. */
@@ -86,7 +95,7 @@ export function asRemoteSettingsNamespace(value: unknown): RemoteSettingsNamespa
  */
 export function createHostSettingsScope<T>(entryId: string): HostSettingsScope<T> {
   const listeners = new Set<() => void>()
-  let snapshot: HostSettingsSnapshot<T> = { value: undefined, writable: false }
+  let snapshot: HostSettingsSnapshot<T> = { value: undefined, writable: false, status: 'unavailable' }
   let namespace: RemoteSettingsNamespace | undefined
   let revision: number | undefined
   let disposed = false
@@ -154,6 +163,11 @@ export function createHostSettingsScope<T>(entryId: string): HostSettingsScope<T
     set: write,
     attach(next: RemoteSettingsNamespace): void {
       namespace = next
+      // A namespace is in hand, so the scope stops claiming the Host serves
+      // none: from here the card falls back to `writable` — still false until
+      // a read lands — which is the answer it gave before the namespace
+      // arrived, rather than the "no settings here" diagnosis.
+      publish({ value: snapshot.value, writable: snapshot.writable })
       void read()
     },
     async reload(): Promise<void> {

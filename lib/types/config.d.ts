@@ -1,5 +1,6 @@
 /** User-facing configuration for supported image providers. */
 import z from '@deepseek-ai/schemastery';
+import type { CompatEditFormat } from './openai-compatible.js';
 import { ARK_BACKGROUND_MODES, ARK_OUTPUT_FORMATS, DEFAULT_DASHSCOPE_ENDPOINT, DEFAULT_DASHSCOPE_MODEL, DEFAULT_COMFYUI_BASE_URL, DEFAULT_COMFYUI_TIMEOUT_MS, DEFAULT_COMFYUI_WORKFLOW_LABEL, DEFAULT_GOOGLE_ENDPOINT, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_SEEDREAM_BASE_URL, DEFAULT_SEEDREAM_MODEL, DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL, DEFAULT_ZHIPU_BASE_URL, DEFAULT_ZHIPU_MODEL, DASHSCOPE_API_KEY_ENV, GOOGLE_API_KEY_ENV, IMAGE_PROVIDERS, OPENAI_API_KEY_ENV, OPENAI_COMPAT_API_KEY_ENV, SEEDREAM_API_KEY_ENV, XAI_API_KEY_ENV, ZHIPU_API_KEY_ENV, activeComfyUIWorkflow, resolveComfyUIWorkflows, type ArkBackgroundMode, type ArkOutputFormat, type ArkOutputOptions, type ComfyUIWorkflowEntry, type ImageProvider } from './shared.js';
 export { ARK_BACKGROUND_MODES, ARK_OUTPUT_FORMATS, DEFAULT_DASHSCOPE_ENDPOINT, DEFAULT_DASHSCOPE_MODEL, DEFAULT_COMFYUI_BASE_URL, DEFAULT_COMFYUI_TIMEOUT_MS, DEFAULT_COMFYUI_WORKFLOW_LABEL, DEFAULT_GOOGLE_ENDPOINT, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_SEEDREAM_BASE_URL, DEFAULT_SEEDREAM_MODEL, DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL, DEFAULT_ZHIPU_BASE_URL, DEFAULT_ZHIPU_MODEL, DASHSCOPE_API_KEY_ENV, GOOGLE_API_KEY_ENV, IMAGE_PROVIDERS, OPENAI_API_KEY_ENV, OPENAI_COMPAT_API_KEY_ENV, SEEDREAM_API_KEY_ENV, XAI_API_KEY_ENV, ZHIPU_API_KEY_ENV, activeComfyUIWorkflow, resolveComfyUIWorkflows, type ArkBackgroundMode, type ArkOutputFormat, type ArkOutputOptions, type ComfyUIWorkflowEntry, type ImageProvider, };
 /** Default workspace subfolder that receives generated image files. */
@@ -16,9 +17,19 @@ export interface Config {
     googleEndpoint?: string;
     openaiBaseURL?: string;
     openaiModel?: string;
+    /** Official model size table: ratio -> resolution tier -> pixels. Empty uses model presets. */
+    openaiSizes?: Record<string, Record<string, string>>;
     /** OpenAI-compatible relay settings; independent from the official OpenAI row. */
     openaiCompatBaseURL?: string;
     openaiCompatModel?: string;
+    /** Default quality; empty preserves the upstream default by omitting the field. */
+    openaiCompatQuality?: string;
+    /** Quality values accepted by this relay; independent of resolution tiers. */
+    openaiCompatQualityOptions?: string[];
+    /** Generation-only JSON fields, merged last (e.g. watermark: false). */
+    openaiCompatExtraBody?: Record<string, unknown>;
+    /** JSON edit sizing stays auto unless the relay supports selected dimensions. */
+    openaiCompatEditSizeMode?: 'auto' | 'selected';
     /**
      * Request shape the relay's images/edits endpoint expects (#41). Most
       * relays take OpenAI's multipart form; some (e.g. SenseNova) accept the
@@ -31,7 +42,7 @@ export interface Config {
     /**
      * Extra JSON fields merged into the JSON edit body last (can override the
      * built-in defaults), e.g. SenseNova's `watermark`/`prompt_extend`.
-     * Ignored unless `openaiCompatEditFormat` is `jsonImageUrlArray`.
+     * Used by JSON edit formats, including automatically recognized official contracts.
      */
     openaiCompatEditExtra?: Record<string, unknown>;
     /**
@@ -117,7 +128,7 @@ export declare function resolveProvider(config: Config): {
     model: string;
     baseURL: string;
     imageSize: string;
-    editFormat: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages';
+    editFormat: CompatEditFormat;
     editExtra: Record<string, unknown>;
 } | {
     provider: 'seedream';

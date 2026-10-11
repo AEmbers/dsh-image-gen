@@ -1,5 +1,5 @@
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment';
-import { type ImageProvider } from '../shared.js';
+import { type ImageProvider, type StudioWatermark } from '../shared.js';
 /** One regenerated version displayed in place of an original conversation image. */
 export interface ConversationImageRevision {
     attachment: ImageAttachmentRef;
@@ -10,6 +10,9 @@ export interface ConversationImageRevision {
     createdAt: number;
     ratio: string;
     quality: string;
+    resolution?: string;
+    generationQuality?: string;
+    watermark?: StudioWatermark;
 }
 export interface ConversationImageRevisionChain {
     originId: string;

@@ -4,12 +4,16 @@ import { ImageGenerationSettingsCard } from '../src/client/index.js'
 
 // Exercise the actual rendered form handlers without a DOM dependency. Effects
 // (host subscriptions and status polling) are outside this form-action harness.
-const hooks = vi.hoisted(() => ({ values: [] as unknown[], cursor: 0 }))
+const hooks = vi.hoisted(() => ({ values: [] as unknown[], cursor: 0, scopeEffects: [] as Array<() => unknown> }))
 vi.mock('react', async importOriginal => {
   const react = await importOriginal<typeof import('react')>()
   return {
     ...react,
-    useEffect: () => {},
+    useEffect(setup: () => unknown, dependencies?: unknown[]) {
+      const dependency = dependencies?.[0] as { getSnapshot?: unknown; set?: unknown; subscribe?: unknown } | undefined
+      if (typeof dependency?.getSnapshot === 'function' && typeof dependency.set === 'function'
+        && typeof dependency.subscribe === 'function') hooks.scopeEffects.push(setup)
+    },
     useState(initial: unknown) {
       const index = hooks.cursor++
       if (!(index in hooks.values)) hooks.values[index] = typeof initial === 'function' ? initial() : initial
@@ -34,7 +38,7 @@ function text(node: ReactNode): string {
   return 'props' in node ? text((node as Element).props.children) : ''
 }
 
-function formHarness(lang = 'zh', initialValue: Record<string, unknown> = { openaiCompatBaseURL: 'https://relay.example/v1' }, provider = 'openai-compat') {
+function formHarness(lang = 'zh', initialValue: Record<string, unknown> = { openaiCompatBaseURL: 'https://relay.example/v1' }, provider = 'openai-compat', state: { writable?: boolean; status?: 'loading' | 'ready' | 'unavailable'; mode?: 'host' | 'memory' } = {}) {
   let stored = { ...initialValue }
   const setKey = vi.fn(async () => ({ ok: true }))
   const setSetting = vi.fn(async (field: string, value: unknown): Promise<boolean | void> => {
@@ -42,7 +46,7 @@ function formHarness(lang = 'zh', initialValue: Record<string, unknown> = { open
   })
   const props = {
     scope: {
-      getSnapshot: () => ({ writable: true, value: stored }),
+      getSnapshot: () => ({ writable: true, value: stored, ...state }),
       subscribe: vi.fn(), set: setSetting,
     },
     credentials: { describe: vi.fn(), set: setKey },
@@ -60,20 +64,64 @@ function formHarness(lang = 'zh', initialValue: Record<string, unknown> = { open
   find(element => element.props.className === 'dsh-ig-provider-head').props.onClick()
   return {
     setKey, setSetting,
+    cardText: () => text(render()),
+    syncScope: () => { for (const setup of hooks.scopeEffects.splice(0)) setup() },
     rowText: () => text(row()),
     typeURL: (value: string) => find(element => element.props.type === 'url').props.onChange({ target: { value } }),
     typeKey: (value: string) => find(element => element.props.type === 'password').props.onChange({ target: { value } }),
     keyValue: () => find(element => element.props.type === 'password').props.value,
+    field: (label: string, value: string) => {
+      const field = find(element => element.type === 'label' && text(element).startsWith(label))
+      elements(field).find(element => ['input', 'textarea', 'select'].includes(String(element.type)))!.props.onChange({ target: { value } })
+    },
     disabled: (label: string) => find(element => element.type === 'button' && text(element) === label).props.disabled,
     click: (label: string) => find(element => element.type === 'button' && text(element) === label).props.onClick(),
     save: () => find(element => element.type === 'form').props.onSubmit({ preventDefault() {} }),
   }
 }
 
-beforeEach(() => { hooks.values = []; hooks.cursor = 0 })
+beforeEach(() => { hooks.values = []; hooks.cursor = 0; hooks.scopeEffects = [] })
 afterEach(() => { vi.unstubAllGlobals() })
 
 describe('settings card credential actions', () => {
+  it.each([
+    { openaiCompatBaseURL: 'https://token.sensenova.cn/v1', openaiCompatModel: 'sensenova-u1.5-lite' },
+    { openaiCompatBaseURL: 'https://workspace-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', openaiCompatModel: 'qwen-image-3.0' },
+  ])('exposes JSON edit fields for a recognized official endpoint without a manual format switch', async config => {
+    const form = formHarness('zh', config)
+    expect(form.rowText()).toContain('自动：官方接口 JSON 格式')
+    form.field('附加 JSON 字段', '{"watermark":false,"prompt_extend":false}')
+    form.save()
+    await vi.waitFor(() => expect(form.setSetting).toHaveBeenCalledWith('openaiCompatEditExtra', { watermark: false, prompt_extend: false }))
+  })
+  it('saves independent resolution, quality and generation JSON fields', async () => {
+    const form = formHarness()
+    form.field('自定义分辨率表', '{"16:9":{"2K":"2048x1152"}}')
+    form.field('默认生成质量', ' high ')
+    form.field('可选生成质量', 'low, high, high')
+    form.field('文生图附加字段', '{"watermark":false,"prompt_extend":false}')
+    form.save()
+    await vi.waitFor(() => expect(form.setSetting).toHaveBeenCalledWith('openaiCompatExtraBody', { watermark: false, prompt_extend: false }))
+    expect(form.setSetting).toHaveBeenCalledWith('openaiCompatSizes', { '16:9': { '2K': '2048x1152' } })
+    expect(form.setSetting).toHaveBeenCalledWith('openaiCompatQuality', 'high')
+    expect(form.setSetting).toHaveBeenCalledWith('openaiCompatQualityOptions', ['low', 'high'])
+  })
+  it.each(['[]', '{broken'])('rejects invalid generation JSON %s before any settings or key write', async invalid => {
+    const form = formHarness()
+    form.typeKey('test-draft')
+    form.field('文生图附加字段', invalid)
+    form.save()
+    await vi.waitFor(() => expect(form.rowText()).toContain('合法的 JSON 对象'))
+    expect(form.setSetting).not.toHaveBeenCalled()
+    expect(form.setKey).not.toHaveBeenCalled()
+  })
+  it('rejects unsupported official sizes before saving any field', async () => {
+    const form = formHarness('zh', { openaiModel: 'gpt-image-2' }, 'openai')
+    form.field('自定义分辨率表', '{"1:1":{"4K":"4096x4096"}}')
+    form.save()
+    await vi.waitFor(() => expect(form.rowText()).toContain('尺寸'))
+    expect(form.setSetting).not.toHaveBeenCalled()
+  })
   it.each(['拉取模型', '测试连接'])('asks to save before %s without sending a request or storing the draft', async action => {
     const fetch = vi.fn(async (_url: string, _init: RequestInit) => ({ ok: true, json: async (): Promise<Record<string, unknown>> => ({ ok: false, reason: 'missing-key' }) }))
     vi.stubGlobal('fetch', fetch)
@@ -155,6 +203,50 @@ describe('settings card credential actions', () => {
     expect(form.rowText()).toContain('Key 未配置')
     expect(form.keyValue()).toBe('sk-draft')
     expect(form.setKey).not.toHaveBeenCalled()
+  })
+})
+
+describe('settings card host state', () => {
+  it('reads a form that became ready between render and subscription instead of staying disabled', () => {
+    const state = { writable: true, status: 'loading' as 'loading' | 'ready', mode: 'host' as const }
+    const form = formHarness('en', {}, 'openai-compat', state)
+    expect(form.disabled('Save')).toBe(true)
+    state.status = 'ready'
+    form.syncScope()
+    expect(form.disabled('Save')).toBe(false)
+    expect(form.cardText()).not.toContain('Settings are loading')
+  })
+  it('explains remote memory mode instead of telling users to edit a profile file', () => {
+    const form = formHarness('zh', {}, 'openai-compat', { writable: false, status: 'unavailable', mode: 'memory' })
+    expect(form.cardText()).toContain('当前连接不支持保存到宿主')
+    expect(form.cardText()).not.toContain('设置由配置文件提供')
+    expect(form.disabled('保存')).toBe(true)
+  })
+
+  it('blocks writes while the real host form is loading even when writable is true', async () => {
+    const form = formHarness('en', {}, 'openai-compat', { writable: true, status: 'loading', mode: 'host' })
+    expect(form.cardText()).toContain('Settings are loading')
+    expect(form.disabled('Save')).toBe(true)
+    form.save()
+    await vi.waitFor(() => expect(form.rowText()).toContain('Settings are loading'))
+    expect(form.setSetting).not.toHaveBeenCalled()
+    expect(form.setKey).not.toHaveBeenCalled()
+  })
+
+  it('explains an unavailable namespace and refuses writes without claiming success', async () => {
+    const form = formHarness('zh', {}, 'openai-compat', { writable: true, status: 'unavailable', mode: 'host' })
+    expect(form.cardText()).toContain('宿主尚未提供图像生成设置')
+    expect(form.disabled('保存')).toBe(true)
+    form.save()
+    await vi.waitFor(() => expect(form.rowText()).toContain('宿主尚未提供图像生成设置'))
+    expect(form.setSetting).not.toHaveBeenCalled()
+  })
+
+  it('keeps an actual read-only document distinct from unavailable services', () => {
+    const form = formHarness('zh', {}, 'openai-compat', { writable: false, status: 'ready', mode: 'host' })
+    expect(form.cardText()).toContain('设置由配置文件提供')
+    expect(form.cardText()).not.toContain('宿主尚未提供图像生成设置')
+    expect(form.disabled('保存')).toBe(true)
   })
 })
 

@@ -5,10 +5,11 @@ export declare const ANTIGRAVITY_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vt
 export declare const ANTIGRAVITY_CLIENT_SECRET = "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";
 export declare const ANTIGRAVITY_REDIRECT_URI = "http://localhost:51121/oauth-callback";
 /**
- * Endpoint fallback order for generation, mirroring the reference (daily
- * sandbox first, then autopush, then prod).
+ * Preserve the working sandbox routes, then try ordinary daily (consumer
+ * accounts) before the production compatibility fallback. A Gmail address
+ * alone does not establish which backend an account can use.
  */
-export declare const ANTIGRAVITY_ENDPOINTS: readonly ["https://daily-cloudcode-pa.sandbox.googleapis.com", "https://autopush-cloudcode-pa.sandbox.googleapis.com", "https://cloudcode-pa.googleapis.com"];
+export declare const ANTIGRAVITY_ENDPOINTS: readonly ["https://daily-cloudcode-pa.sandbox.googleapis.com", "https://autopush-cloudcode-pa.sandbox.googleapis.com", "https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"];
 /** The image model served through this channel: Nano Banana 2. */
 export declare const ANTIGRAVITY_IMAGE_MODEL: string;
 /** Current client version: the fetched one, or the fallback until fetched. */
@@ -26,13 +27,21 @@ export declare function antigravityConfig(): AntigravityConfig;
 export declare function antigravityAuthorizeUrl(cfg: AntigravityConfig, pkce: Pkce): string;
 export declare function antigravityExchangeCode(cfg: AntigravityConfig, pkce: Pkce, code: string): Promise<SubscriptionBlob>;
 export declare function antigravityRefresh(blob: SubscriptionBlob): Promise<SubscriptionBlob>;
+export interface AntigravityProjectContext {
+    projectId: string;
+    source: 'account' | 'fallback';
+    /** Bounded, redacted discovery outcomes, retained for generation failures. */
+    diagnostics: string[];
+}
+/** Compatibility helper for callers that only need the project string. */
+export declare function antigravityResolveProject(blob: SubscriptionBlob, signal?: AbortSignal): Promise<string>;
 /**
- * Resolve the managed project id for the logged-in account. Most accounts
- * have one; when loadCodeAssist reports none, the hardcoded fallback keeps
- * generation working (mirrors the reference's ensureProjectContext).
- * Returns '' only when every endpoint fails, letting generate() throw then.
+ * Discover an actual account project, preserving HTTP and eligibility failures.
+ * Keep the legacy fallback for accounts whose image route still accepts it;
+ * UNSUPPORTED_CLIENT here describes Code Assist, not a universal image ban.
+ * Do not invoke onboarding or accept account terms during image generation.
  */
-export declare function antigravityResolveProject(blob: SubscriptionBlob): Promise<string>;
+export declare function antigravityResolveProjectContext(blob: SubscriptionBlob, signal?: AbortSignal): Promise<AntigravityProjectContext>;
 /**
  * Build the streamGenerateContent request body for one image generation.
  * Ported from the reference buildImageRequest + the wrapping envelope: no
@@ -64,6 +73,7 @@ export interface AntigravityImageResult {
 export declare function antigravityGenerateImage(options: {
     blob: SubscriptionBlob;
     projectId: string;
+    projectContext?: AntigravityProjectContext;
     prompt: string;
     aspectRatio?: string;
     hd?: boolean;

@@ -50,7 +50,8 @@ import {
   antigravityExchangeCode,
   antigravityGenerateImage,
   antigravityRefresh,
-  antigravityResolveProject,
+  antigravityResolveProjectContext,
+  type AntigravityProjectContext,
 } from './vendors/antigravity.js'
 import { SUBSCRIPTION_PROVIDER_DISPLAY_NAMES, type SubscriptionProvider } from '../shared.js'
 import { xaiToolParameters } from '../xai-params.js'
@@ -118,7 +119,7 @@ export class SubscriptionManager {
   /** Cheap in-memory expiry cache so badges do not hit credentials on read. */
   private readonly blobCache = new Map<SubscriptionVendor, SubscriptionBlob>()
   /** Antigravity needs a per-account project id on every generation call. */
-  private readonly projectCache = new Map<string, string>()
+  private readonly projectCache = new Map<string, AntigravityProjectContext>()
 
   constructor(private readonly ctx: Context) {}
 
@@ -241,11 +242,12 @@ export class SubscriptionManager {
     // Antigravity speaks the Gemini contents protocol, not OpenAI-style
     // generations; it gets its own wire call and skips the shared shape below.
     if (vendor === 'antigravity') {
-      const projectId = await this.ensureAntigravityProject(session)
+      const projectContext = await this.ensureAntigravityProject(session, options.signal)
       const aspectRatio = antigravityAspectRatioOf(options.size)
       const result = await antigravityGenerateImage({
         blob: session,
-        projectId,
+        projectId: projectContext.projectId,
+        projectContext,
         prompt: text,
         ...(aspectRatio !== undefined ? { aspectRatio } : {}),
         hd: options.quality === 'hd' || options.quality === 'high',
@@ -314,13 +316,14 @@ export class SubscriptionManager {
    * Antigravity generation envelope needs. Re-resolved when the account
    * signs out or a different account logs in.
    */
-  private async ensureAntigravityProject(blob: SubscriptionBlob): Promise<string> {
+  private async ensureAntigravityProject(blob: SubscriptionBlob, signal?: AbortSignal): Promise<AntigravityProjectContext> {
     const cacheKey = blob.refreshToken.length > 0 ? blob.refreshToken : blob.accessToken.slice(0, 32)
     const cached = this.projectCache.get(cacheKey)
     if (cached !== undefined) return cached
-    const projectId = await antigravityResolveProject(blob)
-    this.projectCache.set(cacheKey, projectId)
-    return projectId
+    const context = await antigravityResolveProjectContext(blob, signal)
+    // A failed discovery must not freeze a made-up project until logout.
+    if (context.source === 'account') this.projectCache.set(cacheKey, context)
+    return context
   }
 }
 

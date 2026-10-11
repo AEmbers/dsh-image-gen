@@ -1,13 +1,13 @@
 // Must stay the first import: it shims CSS.supports before tldraw's
 // module-scope environment probe runs (#40); see css-supports-shim.ts.
 import './tl/css-supports-shim.js'
+import { compatEditFormat } from '../watermark.js'
 import { useEffect, useState, useRef, type ChangeEvent, type FormEvent } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-export interface SettingsScopeSnapshot<T> {
-  value: T | undefined
-  writable: boolean
-}
+import { fetchSettingsHealth, settingsState, type SettingsScopeSnapshot, type SettingsState } from './settings-state.js'
+import type { SettingsHealth } from '../shared.js'
+export type { SettingsScopeSnapshot } from './settings-state.js'
 export interface SettingsScope<T> {
   getSnapshot(): SettingsScopeSnapshot<T>
   subscribe(listener: () => void): () => void
@@ -70,6 +70,8 @@ import {
   type ConversationImageRevisionChain,
 } from './conversation-image-revisions.js'
 import { conversationRegenerateRequest } from './conversation-regenerate.js'
+import { parseExtraFields, parseSizeTable } from './output-settings.js'
+import { DEFAULT_COMPAT_QUALITIES, validateOfficialSize } from '../openai-output.js'
 import { ImageProviderPill, PROVIDER_PILL_STYLE, type ProviderPillFace } from './provider-pill.js'
 import { writeSetting } from './settings-write.js'
 import { asRemoteSettingsNamespace, createHostSettingsScope } from './host-settings.js'
@@ -91,8 +93,14 @@ interface ImageSettings {
   googleEndpoint?: string
   openaiBaseURL?: string
   openaiModel?: string
+  openaiSizes?: Record<string, Record<string, string>>
   openaiCompatBaseURL?: string
   openaiCompatModel?: string
+  openaiCompatSizes?: Record<string, Record<string, string>>
+  openaiCompatQuality?: string
+  openaiCompatQualityOptions?: string[]
+  openaiCompatExtraBody?: Record<string, unknown>
+  openaiCompatEditSizeMode?: 'auto' | 'selected'
   /** Edit-request shape for the openai-compat relay (#41); see src/config.ts. */
   openaiCompatEditFormat?: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages'
   /** Extra JSON fields merged into the JSON edit body; ignored in multipart mode. */
@@ -189,6 +197,10 @@ const DICT = {
     defaultProvider: '默认 Provider',
     defaultProviderHint: 'Agent 生图默认使用；Studio 与工具调用可临时指定其他 Provider。',
     settingsReadOnly: '设置由配置文件提供，只读；如需修改请编辑对应的配置来源。',
+    settingsLoading: '正在加载图像生成设置，请稍候。',
+    settingsRemote: '当前连接不支持保存到宿主，请在 DSH 本机页面修改设置。',
+    settingsUnavailable: '宿主尚未提供图像生成设置，请检查插件是否已启用及其加载日志。',
+    settingsIncompatible: '当前加载的设置库不支持保存。请将插件所在环境的 @deepseek-ai/schemastery 更新到 3.18.4 或兼容的 3.x 版本，并重启 DSH。',
     providerGoogle: 'Google Gemini',
     providerOpenAI: 'OpenAI',
     providerOpenAICompat: 'OpenAI 兼容（中转站）',
@@ -254,9 +266,10 @@ const DICT = {
     endpointHintOpenAICompat: '中转站/自建服务的 OpenAI 兼容 /v1 地址（必填），例如 https://your-relay.example.com/v1。',
     editFormat: '图生图请求形态',
     editFormatMultipart: '标准 multipart（OpenAI 官方）',
+    editFormatAutomatic: '自动：官方接口 JSON 格式',
     editFormatJsonImageUrlArray: 'JSON images 数组（商汤等中转）',
     editFormatFormReferenceImages: 'multipart + reference_images JSON 数组（base64）',
-    editFormatHint: '文生图不受影响。仅当中转站的图生图接口使用自有契约（如商汤 SenseNova 的 JSON images 数组，或要求 reference_images base64 数组的中转）时才需要切换。',
+    editFormatHint: '商汤、通义已确认的官方接口自动使用对应 JSON 格式；其他中转按接口文档选择。文生图不受影响。',
     editExtra: '附加 JSON 字段',
     editExtraPlaceholder: '{"watermark": false, "prompt_extend": true}',
     editExtraHint: '仅 JSON 形态生效；会合并到请求体末尾，可覆盖默认字段。留空表示不附加。',
@@ -273,6 +286,17 @@ const DICT = {
     arkBackgroundTransparent: '透明',
     arkBackgroundHint: '仅图生图有效，且要求参考图本身带透明通道；文生图会被方舟拒绝，因此这一项只在图生图时发出。',
     editExtraInvalid: '附加 JSON 字段必须是合法的 JSON 对象。',
+    sizeTable: '自定义分辨率表（JSON）',
+    sizeTableHint: '格式为「比例 → 档位 → 像素尺寸」。留空使用默认尺寸；例如 {"16:9":{"2K":"2048x1152"}}。',
+    sizeTableInvalid: '分辨率表须为「比例 → 数字档位（如 2K）→ 非空尺寸字符串」的 JSON 对象。',
+    defaultQuality: '默认生成质量',
+    defaultQualityHint: '留空不发送 quality。该参数与分辨率独立，上游须支持所填值。',
+    qualityOptions: '可选生成质量（逗号分隔）',
+    generateExtra: '文生图附加字段（JSON）',
+    generateExtraHint: '仅文生图生效，合并到请求体末尾，可覆盖 size 和 quality。关闭商汤水印可填 {"watermark":false}。',
+    editSizeMode: 'JSON 图生图尺寸',
+    editSizeAuto: '自动（兼容商汤）',
+    editSizeSelected: '使用所选分辨率',
     endpointHintSeedream: '火山方舟兼容的 /api/v3 地址。',
     endpointHintDashScope: '阿里云百炼 DashScope 官方接口地址。',
     endpointHintXAI: 'xAI 官方 api.x.ai 的 /v1 地址。',
@@ -340,6 +364,10 @@ const DICT = {
     defaultProvider: 'Default provider',
     defaultProviderHint: 'Used by the Agent by default; the Studio and tool calls can switch per call.',
     settingsReadOnly: 'Settings come from a profile file and are read-only; edit that source to change them.',
+    settingsLoading: 'Settings are loading; please wait.',
+    settingsRemote: 'This connection cannot save settings to the host. Edit them from the local DSH page.',
+    settingsUnavailable: 'The host has not provided image generation settings. Check that the plugin is enabled and review its load logs.',
+    settingsIncompatible: 'The loaded settings library cannot save these settings. Update @deepseek-ai/schemastery in the plugin environment to 3.18.4 or a compatible 3.x version, then restart DSH.',
     providerGoogle: 'Google Gemini',
     providerOpenAI: 'OpenAI',
     providerOpenAICompat: 'OpenAI-compatible (relay)',
@@ -405,9 +433,10 @@ const DICT = {
     endpointHintOpenAICompat: 'OpenAI-compatible /v1 base URL of your relay or self-hosted service (required), e.g. https://your-relay.example.com/v1.',
     editFormat: 'Edit request format',
     editFormatMultipart: 'Standard multipart (official OpenAI)',
+    editFormatAutomatic: 'Automatic: official JSON contract',
     editFormatJsonImageUrlArray: 'JSON images array (SenseNova etc.)',
     editFormatFormReferenceImages: 'Multipart with a reference_images JSON array (base64)',
-    editFormatHint: 'Text-to-image is unaffected. Only switch when the relay runs image edits on its own contract (e.g. SenseNova\'s JSON images array, or a relay that takes reference_images as a base64 JSON array); size is pinned to "auto" in the JSON images format (the only value SenseNova\'s edits endpoint accepts) and can be overridden via extra fields.',
+    editFormatHint: 'Recognized official SenseNova and Qwen endpoints automatically use their JSON edit contracts. Choose other relay formats according to their documentation. Text-to-image is unaffected.',
     editExtra: 'Extra JSON fields',
     editExtraPlaceholder: '{"watermark": false, "prompt_extend": true}',
     editExtraHint: 'Only used with the JSON format; merged into the request body last and may override defaults. Leave empty for none.',
@@ -424,6 +453,17 @@ const DICT = {
     arkBackgroundTransparent: 'Transparent',
     arkBackgroundHint: 'Image-to-image only, and every reference image must already carry an alpha channel; Ark rejects it for text-to-image, so it is sent on edits alone.',
     editExtraInvalid: 'Extra JSON fields must be a valid JSON object.',
+    sizeTable: 'Custom resolution table (JSON)',
+    sizeTableHint: 'Aspect ratio → tier → pixel size. Leave empty for defaults; e.g. {"16:9":{"2K":"2048x1152"}}.',
+    sizeTableInvalid: 'Use a JSON object mapping ratios to numeric tiers (e.g. 2K) and nonempty size strings.',
+    defaultQuality: 'Default generation quality',
+    defaultQualityHint: 'Leave empty to omit quality. Independent of resolution; the upstream must support this value.',
+    qualityOptions: 'Available generation qualities (comma-separated)',
+    generateExtra: 'Generation extra fields (JSON)',
+    generateExtraHint: 'Generation only. Merged last; can override size and quality. Use {"watermark":false} for SenseNova.',
+    editSizeMode: 'JSON edit dimensions',
+    editSizeAuto: 'Auto (SenseNova compatible)',
+    editSizeSelected: 'Use selected resolution',
     endpointHintSeedream: 'Volcengine Ark compatible /api/v3 base URL.',
     endpointHintDashScope: 'Official Aliyun DashScope endpoint.',
     endpointHintXAI: 'Official xAI api.x.ai /v1 base URL.',
@@ -1142,6 +1182,11 @@ interface ProviderRowState {
   editFormat: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages'
   /** openai-compat only: extra JSON fields for the JSON edit body, as user text. */
   editExtraText: string
+  sizeTableText: string
+  generationQuality: string
+  qualityOptionsText: string
+  generateExtraText: string
+  editSizeMode: 'auto' | 'selected'
   /** seedream only: Ark output controls. Other rows keep the defaults. */
   outputFormat: 'png' | 'jpeg'
   watermark: boolean
@@ -1170,6 +1215,11 @@ function emptyProviderRow(): ProviderRowState {
     timeoutSeconds: DEFAULT_COMFYUI_TIMEOUT_MS / 1000,
     editFormat: 'multipart',
     editExtraText: '',
+    sizeTableText: '',
+    generationQuality: '',
+    qualityOptionsText: DEFAULT_COMPAT_QUALITIES.join(', '),
+    generateExtraText: '',
+    editSizeMode: 'auto',
     outputFormat: 'jpeg',
     watermark: true,
     background: 'opaque',
@@ -1244,6 +1294,7 @@ function rowsFromSettings(value: ImageSettings | undefined): Record<Provider, Pr
       ...emptyProviderRow(),
       model: modelOf(provider, value),
       baseURL: baseURLOf(provider, value),
+      ...(provider === 'openai' ? { sizeTableText: editExtraTextOf(value?.openaiSizes) } : {}),
       ...(provider === 'comfyui' ? {
         workflows: resolveComfyUIWorkflows(value ?? {}),
         activeWorkflow: activeComfyUIWorkflow(value ?? {})?.name ?? '',
@@ -1252,6 +1303,11 @@ function rowsFromSettings(value: ImageSettings | undefined): Record<Provider, Pr
       ...(provider === 'openai-compat' ? {
         editFormat: parseEditFormat(value?.openaiCompatEditFormat),
         editExtraText: editExtraTextOf(value?.openaiCompatEditExtra),
+        sizeTableText: editExtraTextOf(value?.openaiCompatSizes),
+        generationQuality: value?.openaiCompatQuality ?? '',
+        qualityOptionsText: (value?.openaiCompatQualityOptions ?? DEFAULT_COMPAT_QUALITIES).join(', '),
+        generateExtraText: editExtraTextOf(value?.openaiCompatExtraBody),
+        editSizeMode: value?.openaiCompatEditSizeMode === 'selected' ? 'selected' : 'auto',
       } : {}),
       ...(provider === 'seedream' ? {
         outputFormat: value?.seedreamOutputFormat === 'png' ? 'png' : 'jpeg',
@@ -1267,6 +1323,9 @@ function rowsFromSettings(value: ImageSettings | undefined): Record<Provider, Pr
 export function ImageGenerationSettingsCard(props: SettingsCardProps) {
   const [open, setOpen] = useState(false)
   const [snapshot, setSnapshot] = useState(() => props.scope.getSnapshot())
+  const [health, setHealth] = useState<SettingsHealth>()
+  const state = settingsState(snapshot, health)
+  const settingsWritable = state === 'ready'
   const [lang, setLang] = useState(() => (props.locale?.getSnapshot?.()?.active?.startsWith('en') ? 'en' : 'zh'))
   const [defaultProvider, setDefaultProvider] = useState<Provider>(() => props.scope.getSnapshot().value?.provider ?? 'google')
   const [providerMessage, setProviderMessage] = useState('')
@@ -1293,7 +1352,22 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
   // the badge flips without closing and reopening the settings card.
   const [subPending, setSubPending] = useState<Array<{ provider: SubscriptionProvider; startedAt: number }>>([])
 
-  useEffect(() => props.scope.subscribe(() => { setSnapshot(props.scope.getSnapshot()) }), [props.scope])
+  useEffect(() => {
+    const sync = (): void => { setSnapshot(props.scope.getSnapshot()) }
+    const unsubscribe = props.scope.subscribe(sync)
+    // The host may accept its first view between render and subscription.
+    // Re-read after subscribing so the card cannot stay in a stale loading state.
+    sync()
+    return unsubscribe
+  }, [props.scope])
+  useEffect(() => {
+    if (!open || snapshot.mode === 'memory') return undefined
+    const controller = new AbortController()
+    void fetchSettingsHealth(controller.signal).then(value => {
+      if (!controller.signal.aborted) setHealth(value)
+    })
+    return () => { controller.abort() }
+  }, [open, snapshot.status, snapshot.mode])
   useEffect(() => {
     return props.locale?.subscribe?.(() => {
       setLang(props.locale?.getSnapshot?.()?.active?.startsWith('en') ? 'en' : 'zh')
@@ -1420,8 +1494,15 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
     }
     return text
   }
-  const saveSetting = (field: string, value: unknown): Promise<void> =>
-    writeSetting(props.scope, field, value, t('settingsWriteRejected'))
+  const stateMessages = {
+    loading: 'settingsLoading', remote: 'settingsRemote', unavailable: 'settingsUnavailable',
+    readOnly: 'settingsReadOnly', incompatible: 'settingsIncompatible',
+  } as const satisfies Record<Exclude<SettingsState, 'ready'>, DictKey>
+  const settingsMessage = state === 'ready' ? undefined : t(stateMessages[state])
+  const saveSetting = async (field: string, value: unknown): Promise<void> => {
+    if (settingsMessage !== undefined) throw new Error(settingsMessage)
+    await writeSetting(props.scope, field, value, t('settingsWriteRejected'))
+  }
 
   const providerLabels: Record<Provider, string> = {
     google: t('providerGoogle'),
@@ -1541,23 +1622,22 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
         // store.
         await saveSetting('subscriptionProxyUrl', subProxy.trim())
       } else {
-        // Validate the compat edit extras BEFORE any write: a broken JSON
-        // object must not half-save (model/baseURL persisted, extras rejected).
-        let editExtra: Record<string, unknown> = {}
-        if (provider === 'openai-compat') {
-          const extraText = row.editExtraText.trim()
-          if (extraText.length > 0) {
-            let parsed: unknown
-            try { parsed = JSON.parse(extraText) } catch { throw new Error(t('editExtraInvalid')) }
-            if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error(t('editExtraInvalid'))
-            editExtra = parsed as Record<string, unknown>
-          }
-        }
+        // Validate all output controls before writing model, address or extras.
+        const editExtra = provider === 'openai-compat' ? parseExtraFields(row.editExtraText, t('editExtraInvalid')) : {}
+        const sizeTable = provider === 'openai' || provider === 'openai-compat' ? parseSizeTable(row.sizeTableText, t('sizeTableInvalid')) : {}
+        const generateExtra = provider === 'openai-compat' ? parseExtraFields(row.generateExtraText, t('editExtraInvalid')) : {}
+        if (provider === 'openai') for (const tiers of Object.values(sizeTable)) for (const size of Object.values(tiers)) validateOfficialSize(row.model, size)
         await saveSetting(modelFieldOf(provider), row.model)
         await saveSetting(baseURLFieldOf(provider), row.baseURL)
+        if (provider === 'openai') await saveSetting('openaiSizes', sizeTable)
         if (provider === 'openai-compat') {
           await saveSetting('openaiCompatEditFormat', row.editFormat)
           await saveSetting('openaiCompatEditExtra', editExtra)
+          await saveSetting('openaiCompatSizes', sizeTable)
+          await saveSetting('openaiCompatQuality', row.generationQuality.trim())
+          await saveSetting('openaiCompatQualityOptions', [...new Set(row.qualityOptionsText.split(',').map(value => value.trim()).filter(Boolean))])
+          await saveSetting('openaiCompatExtraBody', generateExtra)
+          await saveSetting('openaiCompatEditSizeMode', row.editSizeMode)
         }
         if (provider === 'seedream') {
           await saveSetting('seedreamOutputFormat', row.outputFormat)
@@ -1785,6 +1865,10 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
 
   const renderCloudBody = (provider: CloudImageProvider) => {
     const row = rows[provider]
+    const officialEditFormat = provider === 'openai-compat'
+      ? compatEditFormat({ openaiCompatBaseURL: row.baseURL, openaiCompatModel: row.model }) : 'multipart'
+    const automaticEditFormat = officialEditFormat !== 'multipart'
+    const editFormat = automaticEditFormat ? officialEditFormat : row.editFormat
     const keyRef = cloudCredentialRef(provider) ?? ''
     const keyReadOnly = row.keyInfo?.writable === false
     const keyUnavailable = !credentialsAvailable()
@@ -1800,7 +1884,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
               value={row.keyInput}
               onChange={event => { updateRow(provider, { keyInput: event.target.value }) }}
               placeholder={row.keyStatus === 'configured' ? t('apiKeyPlaceholder') : ''}
-              disabled={!snapshot.writable || keyReadOnly || keyUnavailable}
+              disabled={!settingsWritable || keyReadOnly || keyUnavailable}
             />
             <span className="dsh-ig-hint">
               {keyUnavailable ? t('credentialsUnavailable')
@@ -1811,9 +1895,9 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
           <label className="dsh-ig-field">
             <span className="dsh-ig-label">{t('endpoint')}</span>
             <div className="dsh-ig-input-group">
-              <input className="dsh-ig-input" type="url" value={row.baseURL} onChange={event => { updateRow(provider, { baseURL: event.target.value }) }} required disabled={!snapshot.writable} />
+              <input className="dsh-ig-input" type="url" value={row.baseURL} onChange={event => { updateRow(provider, { baseURL: event.target.value }) }} required disabled={!settingsWritable} />
               {provider !== 'openai-compat' ? (
-                <button type="button" className="dsh-ig-btn-reset" title={t('resetTitle')} onClick={() => { updateRow(provider, { baseURL: DEFAULT_BASE_URLS[provider] }) }} disabled={!snapshot.writable}>{t('reset')}</button>
+                <button type="button" className="dsh-ig-btn-reset" title={t('resetTitle')} onClick={() => { updateRow(provider, { baseURL: DEFAULT_BASE_URLS[provider] }) }} disabled={!settingsWritable}>{t('reset')}</button>
               ) : null}
             </div>
             <span className="dsh-ig-hint">{t(CLOUD_HINT_KEYS[provider])}</span>
@@ -1828,7 +1912,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
                   onChange={event => { updateRow(provider, { model: event.target.value }) }}
                   list={`dsh-ig-${provider}-model-options`}
                   required={provider !== 'openai-compat'}
-                  disabled={!snapshot.writable}
+                  disabled={!settingsWritable}
                 />
                 <datalist id={`dsh-ig-${provider}-model-options`}>
                   {row.modelOptions.map(id => <option key={id} value={id} />)}
@@ -1836,12 +1920,12 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
                 <button
                   type="button"
                   className="dsh-ig-btn-secondary"
-                  disabled={row.fetchingModels || row.saving || !snapshot.writable}
+                  disabled={row.fetchingModels || row.saving || !settingsWritable}
                   onClick={() => { void fetchProviderModels(provider) }}
                 >{row.fetchingModels ? t('fetchingModels') : t('fetchModels')}</button>
               </div>
             ) : (
-              <input className="dsh-ig-input" value={row.model} onChange={event => { updateRow(provider, { model: event.target.value }) }} required disabled={!snapshot.writable} />
+              <input className="dsh-ig-input" value={row.model} onChange={event => { updateRow(provider, { model: event.target.value }) }} required disabled={!settingsWritable} />
             )}
             {modelPullSupported(provider) ? (
               row.modelFetchMessage.length > 0 ? (
@@ -1856,10 +1940,11 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
               <span className="dsh-ig-label">{t('editFormat')}</span>
               <select
                 className="dsh-ig-input"
-                value={row.editFormat}
+                value={automaticEditFormat ? '__official__' : row.editFormat}
                 onChange={event => { updateRow(provider, { editFormat: parseEditFormat(event.target.value) }) }}
-                disabled={!snapshot.writable}
+                disabled={!settingsWritable || automaticEditFormat}
               >
+                {automaticEditFormat ? <option value="__official__">{t('editFormatAutomatic')}</option> : null}
                 <option value="multipart">{t('editFormatMultipart')}</option>
                 <option value="jsonImageUrlArray">{t('editFormatJsonImageUrlArray')}</option>
                 <option value="formReferenceImages">{t('editFormatFormReferenceImages')}</option>
@@ -1875,7 +1960,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
                   className="dsh-ig-input"
                   value={row.outputFormat}
                   onChange={event => { updateRow(provider, { outputFormat: event.target.value === 'png' ? 'png' : 'jpeg' }) }}
-                  disabled={!snapshot.writable}
+                  disabled={!settingsWritable}
                 >
                   <option value="jpeg">{t('arkOutputFormatJpeg')}</option>
                   <option value="png">{t('arkOutputFormatPng')}</option>
@@ -1888,7 +1973,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
                   className="dsh-ig-input"
                   value={row.watermark ? 'on' : 'off'}
                   onChange={event => { updateRow(provider, { watermark: event.target.value === 'on' }) }}
-                  disabled={!snapshot.writable}
+                  disabled={!settingsWritable}
                 >
                   <option value="on">{t('arkWatermarkOn')}</option>
                   <option value="off">{t('arkWatermarkOff')}</option>
@@ -1901,7 +1986,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
                   className="dsh-ig-input"
                   value={row.background}
                   onChange={event => { updateRow(provider, { background: event.target.value === 'transparent' ? 'transparent' : 'opaque' }) }}
-                  disabled={!snapshot.writable}
+                  disabled={!settingsWritable}
                 >
                   <option value="opaque">{t('arkBackgroundOpaque')}</option>
                   <option value="transparent">{t('arkBackgroundTransparent')}</option>
@@ -1910,7 +1995,41 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
               </label>
             </>
           ) : null}
-          {provider === 'openai-compat' && row.editFormat === 'jsonImageUrlArray' ? (
+          {provider === 'openai' || provider === 'openai-compat' ? (
+            <label className="dsh-ig-field">
+              <span className="dsh-ig-label">{t('sizeTable')}</span>
+              <textarea className="dsh-ig-input dsh-ig-textarea" value={row.sizeTableText} onChange={event => { updateRow(provider, { sizeTableText: event.target.value }) }} rows={3} disabled={!settingsWritable} />
+              <span className="dsh-ig-hint">{t('sizeTableHint')}</span>
+            </label>
+          ) : null}
+          {provider === 'openai-compat' ? (
+            <>
+              <label className="dsh-ig-field">
+                <span className="dsh-ig-label">{t('defaultQuality')}</span>
+                <input className="dsh-ig-input" value={row.generationQuality} onChange={event => { updateRow(provider, { generationQuality: event.target.value }) }} placeholder="high" disabled={!settingsWritable} />
+                <span className="dsh-ig-hint">{t('defaultQualityHint')}</span>
+              </label>
+              <label className="dsh-ig-field">
+                <span className="dsh-ig-label">{t('qualityOptions')}</span>
+                <input className="dsh-ig-input" value={row.qualityOptionsText} onChange={event => { updateRow(provider, { qualityOptionsText: event.target.value }) }} disabled={!settingsWritable} />
+              </label>
+              <label className="dsh-ig-field">
+                <span className="dsh-ig-label">{t('generateExtra')}</span>
+                <textarea className="dsh-ig-input dsh-ig-textarea" value={row.generateExtraText} onChange={event => { updateRow(provider, { generateExtraText: event.target.value }) }} placeholder={'{"watermark":false}'} rows={2} disabled={!settingsWritable} />
+                <span className="dsh-ig-hint">{t('generateExtraHint')}</span>
+              </label>
+            </>
+          ) : null}
+          {provider === 'openai-compat' && (editFormat === 'jsonImageUrlArray' || editFormat === 'qwenJson') ? (
+            <>
+            {editFormat === 'jsonImageUrlArray' ? (
+            <label className="dsh-ig-field">
+              <span className="dsh-ig-label">{t('editSizeMode')}</span>
+              <select className="dsh-ig-input" value={row.editSizeMode} onChange={event => { updateRow(provider, { editSizeMode: event.target.value === 'selected' ? 'selected' : 'auto' }) }} disabled={!settingsWritable}>
+                <option value="auto">{t('editSizeAuto')}</option><option value="selected">{t('editSizeSelected')}</option>
+              </select>
+            </label>
+            ) : null}
             <label className="dsh-ig-field">
               <span className="dsh-ig-label">{t('editExtra')}</span>
               <textarea
@@ -1919,10 +2038,11 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
                 onChange={event => { updateRow(provider, { editExtraText: event.target.value }) }}
                 placeholder={t('editExtraPlaceholder')}
                 rows={2}
-                disabled={!snapshot.writable}
+                disabled={!settingsWritable}
               />
               <span className="dsh-ig-hint">{t('editExtraHint')}</span>
             </label>
+            </>
           ) : null}
           <div className="dsh-ig-row-actions">
             <p className={`dsh-ig-status${row.messageIsError ? ' dsh-ig-status-error' : ''}`} role="status">{row.message || testResultText(row.testResult)}</p>
@@ -1931,7 +2051,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
               {row.keyStatus === 'configured' && !keyReadOnly ? (
                 <button type="button" className="dsh-ig-btn-secondary dsh-ig-btn-danger" disabled={row.saving} onClick={() => { void clearProviderKey(provider) }}>{t('clearKey')}</button>
               ) : null}
-              <button className="dsh-ig-save" type="submit" disabled={row.saving || row.testing || row.fetchingModels || !snapshot.writable}>{row.saving ? t('saving') : t('save')}</button>
+              <button className="dsh-ig-save" type="submit" disabled={row.saving || row.testing || row.fetchingModels || !settingsWritable}>{row.saving ? t('saving') : t('save')}</button>
             </span>
           </div>
         </form>
@@ -1947,8 +2067,8 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
           <label className="dsh-ig-field">
             <span className="dsh-ig-label">{t('endpoint')}</span>
             <div className="dsh-ig-input-group">
-              <input className="dsh-ig-input" type="url" value={row.baseURL} onChange={event => { updateRow('comfyui', { baseURL: event.target.value }) }} required disabled={!snapshot.writable} />
-              <button type="button" className="dsh-ig-btn-reset" title={t('resetTitle')} onClick={() => { updateRow('comfyui', { baseURL: DEFAULT_BASE_URLS.comfyui }) }} disabled={!snapshot.writable}>{t('reset')}</button>
+              <input className="dsh-ig-input" type="url" value={row.baseURL} onChange={event => { updateRow('comfyui', { baseURL: event.target.value }) }} required disabled={!settingsWritable} />
+              <button type="button" className="dsh-ig-btn-reset" title={t('resetTitle')} onClick={() => { updateRow('comfyui', { baseURL: DEFAULT_BASE_URLS.comfyui }) }} disabled={!settingsWritable}>{t('reset')}</button>
             </div>
             <span className="dsh-ig-hint">{t('endpointHintComfyUI')}</span>
           </label>
@@ -1998,14 +2118,14 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
           </div>
           <label className="dsh-ig-field">
             <span className="dsh-ig-label">{t('timeout')}</span>
-            <input className="dsh-ig-input" type="number" min="1" max="3600" step="1" value={row.timeoutSeconds} onChange={event => { updateRow('comfyui', { timeoutSeconds: Number(event.target.value) }) }} required disabled={!snapshot.writable} />
+            <input className="dsh-ig-input" type="number" min="1" max="3600" step="1" value={row.timeoutSeconds} onChange={event => { updateRow('comfyui', { timeoutSeconds: Number(event.target.value) }) }} required disabled={!settingsWritable} />
             <span className="dsh-ig-hint">{t('timeoutHint')}</span>
           </label>
           <div className="dsh-ig-row-actions">
             <p className={`dsh-ig-status${row.messageIsError ? ' dsh-ig-status-error' : ''}`} role="status">{row.message || testResultText(row.testResult)}</p>
             <span className="dsh-ig-row-buttons">
               <button type="button" className="dsh-ig-btn-secondary" disabled={row.testing} onClick={() => { void testConnection('comfyui') }}>{row.testing ? t('testing') : t('testConnection')}</button>
-              <button className="dsh-ig-save" type="submit" disabled={row.saving || !snapshot.writable || row.workflows.length === 0}>{row.saving ? t('saving') : t('save')}</button>
+              <button className="dsh-ig-save" type="submit" disabled={row.saving || !settingsWritable || row.workflows.length === 0}>{row.saving ? t('saving') : t('save')}</button>
             </span>
           </div>
         </form>
@@ -2051,7 +2171,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
             <p className={`dsh-ig-status${row.messageIsError ? ' dsh-ig-status-error' : ''}`} role="status">{row.message || testResultText(row.testResult)}</p>
             <span className="dsh-ig-row-buttons">
               <button type="button" className="dsh-ig-btn-secondary" disabled={row.testing} onClick={() => { void testConnection(provider); setSubTick(tick => tick + 1) }}>{row.testing ? t('testing') : t('testConnection')}</button>
-              <button className="dsh-ig-save" type="submit" disabled={row.saving || !snapshot.writable}>{row.saving ? t('saving') : t('save')}</button>
+              <button className="dsh-ig-save" type="submit" disabled={row.saving || !settingsWritable}>{row.saving ? t('saving') : t('save')}</button>
             </span>
           </div>
         </form>
@@ -2089,7 +2209,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
       </button>
       {open ? (
         <div className="dsh-ig-body">
-          {!snapshot.writable ? <p className="dsh-ig-status dsh-ig-status-readonly" role="note">{t('settingsReadOnly')}</p> : null}
+          {settingsMessage !== undefined ? <p className="dsh-ig-status dsh-ig-status-readonly" role="note">{settingsMessage}</p> : null}
           <div className="dsh-ig-field">
             <span className="dsh-ig-label">{t('defaultProvider')}</span>
             <div className="dsh-ig-radios" role="radiogroup" aria-label={t('defaultProvider')}>
@@ -2100,7 +2220,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
                     name="dsh-ig-default-provider"
                     checked={defaultProvider === provider}
                     onChange={() => { selectDefaultProvider(provider) }}
-                    disabled={!snapshot.writable}
+                    disabled={!settingsWritable}
                   />
                   {providerLabels[provider]}
                 </label>
@@ -2116,7 +2236,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
             <span className="dsh-ig-section-title">{t('workspaceSection')}</span>
             <div className="dsh-ig-field">
               <label className="dsh-ig-check-row">
-                <input type="checkbox" checked={saveToWorkspace} onChange={event => { toggleSaveToWorkspace(event.target.checked) }} disabled={!snapshot.writable} />
+                <input type="checkbox" checked={saveToWorkspace} onChange={event => { toggleSaveToWorkspace(event.target.checked) }} disabled={!settingsWritable} />
                 <span className="dsh-ig-label">{t('saveToWorkspace')}</span>
               </label>
               <span className="dsh-ig-hint">{t('saveToWorkspaceHint')}</span>
@@ -2131,7 +2251,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
                   onBlur={() => { commitWorkspaceFolder() }}
                   onKeyDown={event => { if (event.key === 'Enter') commitWorkspaceFolder() }}
                   placeholder="dsh-image-gen"
-                  disabled={!snapshot.writable}
+                  disabled={!settingsWritable}
                 />
                 <span className="dsh-ig-hint">{t('folderHint')}</span>
               </label>
@@ -2146,7 +2266,7 @@ export function ImageGenerationSettingsCard(props: SettingsCardProps) {
                   type="checkbox"
                   checked={showPill}
                   onChange={event => { toggleShowPill(event.target.checked) }}
-                  disabled={!snapshot.writable}
+                  disabled={!settingsWritable}
                 />
                 <span className="dsh-ig-label">{t('showPill')}</span>
               </label>
@@ -2400,7 +2520,7 @@ function ImageResultCard({
       const request = conversationRegenerateRequest(
         activeResult,
         regeneratePrompt,
-        selectedRevision === undefined ? undefined : { ratio: selectedRevision.ratio, quality: selectedRevision.quality },
+        selectedRevision === undefined ? undefined : { ratio: selectedRevision.ratio, quality: selectedRevision.quality, resolution: selectedRevision.resolution, generationQuality: selectedRevision.generationQuality, watermark: selectedRevision.watermark },
       )
       const response = await fetch(STUDIO_ROUTE, {
         method: 'POST',
@@ -2422,6 +2542,9 @@ function ImageResultCard({
         createdAt: payload.createdAt,
         ratio: request.ratio,
         quality: request.quality,
+        ...(request.resolution === undefined ? {} : { resolution: request.resolution }),
+        ...(request.generationQuality === undefined ? {} : { generationQuality: request.generationQuality }),
+        ...(request.watermark === undefined ? {} : { watermark: request.watermark }),
       }
       const savedOk = await saveGalleryItem({
         id: String(revision.attachment.attachmentId),
@@ -2432,6 +2555,9 @@ function ImageResultCard({
         createdAt: revision.createdAt,
         aspectRatio: revision.ratio,
         imageSize: revision.quality,
+        resolution: revision.resolution,
+        generationQuality: revision.generationQuality,
+        watermark: revision.watermark,
         output: revision.output,
         ...(savedTo ? { savedTo } : {}),
         ...(sessionId ? { sessionId } : {}),

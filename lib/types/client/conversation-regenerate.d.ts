@@ -1,4 +1,4 @@
-import { type StudioGenerateRequest } from '../shared.js';
+import { type StudioGenerateRequest, type StudioWatermark } from '../shared.js';
 export interface RegeneratableImage {
     provider: string;
     model: string;
@@ -8,4 +8,7 @@ export interface RegeneratableImage {
 export declare function conversationRegenerateRequest(image: RegeneratableImage, prompt: string, remembered?: {
     ratio: string;
     quality: string;
+    resolution?: string | undefined;
+    generationQuality?: string | undefined;
+    watermark?: StudioWatermark | undefined;
 } | undefined): StudioGenerateRequest;

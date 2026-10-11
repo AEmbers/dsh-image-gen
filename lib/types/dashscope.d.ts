@@ -6,6 +6,7 @@ export interface DashScopeImageOptions {
     model: string;
     prompt: string;
     size?: string;
+    watermark?: boolean;
     maxBytes: number;
     signal?: AbortSignal;
 }

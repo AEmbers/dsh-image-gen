@@ -1,9 +1,7 @@
 import './tl/css-supports-shim.js';
 import type { Context } from '@deepseek-ai/cordis';
-export interface SettingsScopeSnapshot<T> {
-    value: T | undefined;
-    writable: boolean;
-}
+import { type SettingsScopeSnapshot } from './settings-state.js';
+export type { SettingsScopeSnapshot } from './settings-state.js';
 export interface SettingsScope<T> {
     getSnapshot(): SettingsScopeSnapshot<T>;
     subscribe(listener: () => void): () => void;
@@ -21,8 +19,14 @@ interface ImageSettings {
     googleEndpoint?: string;
     openaiBaseURL?: string;
     openaiModel?: string;
+    openaiSizes?: Record<string, Record<string, string>>;
     openaiCompatBaseURL?: string;
     openaiCompatModel?: string;
+    openaiCompatSizes?: Record<string, Record<string, string>>;
+    openaiCompatQuality?: string;
+    openaiCompatQualityOptions?: string[];
+    openaiCompatExtraBody?: Record<string, unknown>;
+    openaiCompatEditSizeMode?: 'auto' | 'selected';
     /** Edit-request shape for the openai-compat relay (#41); see src/config.ts. */
     openaiCompatEditFormat?: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages';
     /** Extra JSON fields merged into the JSON edit body; ignored in multipart mode. */
@@ -117,4 +121,3 @@ export declare function GeneratedImageCard(props: ImageCardProps): import("react
 export declare function GeneratedImagesCard(props: ImageCardProps): import("react").JSX.Element;
 /** Render modern image artifacts as final conversation output instead of Tool process content. */
 export declare function PromotedImageResultNode(props: ImageResultNodeProps): import("react").JSX.Element;
-export {};

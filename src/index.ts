@@ -27,8 +27,11 @@ import { BUNDLED_INSPIRATION_CATALOG, searchInspirationCases } from './inspirati
 import { generateFromStudio, describeStudio } from './studio.js'
 import { serveStudio } from './studio-route.js'
 import { serveTestConnection } from './test-route.js'
+import { describeSettingsHealth, serveSettingsHealth } from './settings-health.js'
+import { SETTINGS_HEALTH_ROUTE, type SettingsHealth } from './shared.js'
 import { deleteImageFromWorkspace, getDshWorkspaceRoots, getDshWorkspacesFull, saveImageToWorkspace } from './workspace-save.js'
 import { xaiToolParameters } from './xai-params.js'
+import { compatRequestQuality, officialQualityOptions, validateOfficialSize } from './openai-output.js'
 
 export { Config } from './config.js'
 export { IMAGE_ROUTE, DELETE_ROUTE, SAVE_WORKSPACE_ROUTE, imageAttachmentFromMeta } from './image-route.js'
@@ -66,6 +69,7 @@ interface SingleGenerationArgs {
   aspect_ratio?: string
   image_size?: string
   size?: string
+  quality?: string
   workflow?: string
 }
 
@@ -115,10 +119,14 @@ export function apply(ctx: Context, config: Config = {}): void {
   setSubscriptionProxyResolver(() => current().subscriptionProxyUrl ?? '')
   registerSubscriptionRoutes(ctx, subscriptionManager)
 
-  installImageSettings(ctx, current(), {
+  const settingsHealth = installImageSettings(ctx, current(), {
     setSource: source => { current = () => migrateOpenAICompatConfig(plainConfig(source())) },
     onChange: () => {},
   })
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact', path: SETTINGS_HEALTH_ROUTE,
+    handler: (req, res) => serveSettingsHealth(req, res, settingsHealth()),
+  }), 'dsh-image-gen: settings health')
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact', path: IMAGE_ROUTE,
     handler: (req, res) => serveImage(req, res, { readImage: ref => ctx.attachments.readImage(ref) }),
@@ -282,8 +290,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     // Ark output controls exist only on the Seedream profile; every other
     // provider in this branch ignores them.
     const arkOptions = active.provider === 'seedream' ? active.arkOptions : undefined
-    const generated = await generateOpenAICompatibleImage({ provider: active.provider, apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, ...(arkOptions === undefined ? {} : { arkOptions }) })
-    return saveGenerated(ctx, generated, active.provider, active.model, size, current(), exec, knownWorkspaceRoots)
+    if (active.provider === 'openai') validateOfficialSize(active.model, size)
+    const quality = active.provider === 'openai-compat' ? compatRequestQuality(current(), args.quality) : active.provider === 'openai' ? args.quality : undefined
+    if (active.provider === 'openai' && quality !== undefined && !officialQualityOptions(active.model).some(option => option.value === quality)) throw new Error('该 OpenAI 模型不支持所选生成质量')
+    const generated = await generateOpenAICompatibleImage({ provider: active.provider, apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, ...(quality === undefined ? {} : { quality }), ...(active.provider === 'openai-compat' ? { extraBody: current().openaiCompatExtraBody ?? {} } : {}), ...(arkOptions === undefined ? {} : { arkOptions }) })
+    return saveGenerated(ctx, generated, active.provider, active.model, quality === undefined ? size : `${size}, quality=${quality}`, current(), exec, knownWorkspaceRoots)
   }
 
   ctx.tools.register(defineTool({
@@ -296,6 +307,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9'], description: 'Optional output aspect ratio for Google Gemini, xAI Grok, and subscription channels.' },
       image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K).' },
       size: { type: 'string', description: 'Optional dimensions or size tier for OpenAI, Seedream, or DashScope; WIDTHxHEIGHT maps to aspect_ratio for xAI Grok.' },
+      quality: { type: 'string', description: 'Optional generation quality for OpenAI or compatible APIs, independent of pixel size (e.g. auto, low, medium, high). Omit to use the configured default.' },
       workflow: { type: 'string', description: 'Optional name of the ComfyUI workflow to run; omit to use the active workflow from settings. Only meaningful when the ComfyUI provider is selected.' },
     },
     output: imageOutput('Generated'),
@@ -315,6 +327,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9'], description: 'Optional output aspect ratio for Google Gemini, xAI Grok, and subscription channels.' },
       image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K).' },
       size: { type: 'string', description: 'Optional dimensions or size tier for OpenAI, Seedream, or DashScope; WIDTHxHEIGHT maps to aspect_ratio for xAI Grok.' },
+      quality: { type: 'string', description: 'Optional OpenAI or compatible generation quality, applied to every item independently of size.' },
       workflow: { type: 'string', description: 'Optional name of the ComfyUI workflow to run; omit to use the active workflow from settings.' },
     },
     output: {
@@ -362,6 +375,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             ...(args.aspect_ratio !== undefined ? { aspect_ratio: args.aspect_ratio } : {}),
             ...(args.image_size !== undefined ? { image_size: args.image_size } : {}),
             ...(args.size !== undefined ? { size: args.size } : {}),
+            ...(args.quality !== undefined ? { quality: args.quality } : {}),
             ...(args.workflow !== undefined ? { workflow: args.workflow } : {}),
           }, exec)
           images.push({ ...value, prompt })
@@ -389,6 +403,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9'], description: 'Optional output aspect ratio for Google Gemini, xAI Grok, and subscription channels.' },
       image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K).' },
       size: { type: 'string', description: 'Optional output size for OpenAI, Seedream, or DashScope; WIDTHxHEIGHT maps to aspect_ratio for xAI Grok.' },
+      quality: { type: 'string', description: 'Optional generation quality for OpenAI or compatible edits, independent of size.' },
       workflow: { type: 'string', description: 'Optional name of the ComfyUI workflow to run; omit to use the active workflow from settings. Only meaningful when the ComfyUI provider is selected.' },
     },
     output: imageOutput('Edited'),
@@ -466,9 +481,12 @@ export function apply(ctx: Context, config: Config = {}): void {
 
       const size = args.size ?? active.imageSize
       if (active.provider === 'openai' || active.provider === 'openai-compat' || active.provider === 'xai' || active.provider === 'zhipu') {
+        if (active.provider === 'openai') validateOfficialSize(active.model, size)
+        const quality = active.provider === 'openai-compat' ? compatRequestQuality(current(), args.quality) : active.provider === 'openai' ? args.quality : undefined
+        if (active.provider === 'openai' && quality !== undefined && !officialQualityOptions(active.model).some(option => option.value === quality)) throw new Error('该 OpenAI 模型不支持所选生成质量')
         const xaiExtraBody = active.provider === 'xai' ? xaiToolParameters({ ...(args.aspect_ratio !== undefined ? { aspectRatio: args.aspect_ratio } : {}), ...(args.image_size !== undefined ? { imageSize: args.image_size } : {}), ...(args.size !== undefined ? { size: args.size } : {}) }) : undefined
-        const generated = await editOpenAICompatibleImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, sourceImages, ...(active.provider === 'xai' ? {} : { size }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, ...(active.provider === 'openai-compat' ? { editFormat: active.editFormat, editExtra: active.editExtra } : active.provider === 'xai' ? { editFormat: 'xaiJson' as const, ...(xaiExtraBody === undefined ? {} : { extraBody: xaiExtraBody }) } : {}) })
-        return saveGenerated(ctx, generated, active.provider, active.model, active.provider === 'xai' ? (xaiExtraBody?.aspect_ratio ?? 'auto') : size, current(), exec, knownWorkspaceRoots)
+        const generated = await editOpenAICompatibleImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, sourceImages, ...(active.provider === 'xai' ? {} : { size }), ...(quality === undefined ? {} : { quality }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, ...(active.provider === 'openai-compat' ? { editFormat: active.editFormat, editExtra: active.editExtra, editSizeMode: current().openaiCompatEditSizeMode ?? 'auto' } : active.provider === 'xai' ? { editFormat: 'xaiJson' as const, ...(xaiExtraBody === undefined ? {} : { extraBody: xaiExtraBody }) } : {}) })
+        return saveGenerated(ctx, generated, active.provider, active.model, active.provider === 'xai' ? (xaiExtraBody?.aspect_ratio ?? 'auto') : quality === undefined ? size : `${size}, quality=${quality}`, current(), exec, knownWorkspaceRoots)
       }
       if (active.provider === 'seedream') {
         const generated = await editSeedreamImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, arkOptions: active.arkOptions })
@@ -619,12 +637,22 @@ interface SettingsSectionInstaller {
  * on the service, so the namespace registers through it; DSH 0.1.7 replaced it
  * with schema-derived forms served by the loader itself (keyed by entry id),
  * so its service carries no installer and a host without any settings service
- * simply never runs the callback — both stay silent instead of warning.
+ * simply never runs the callback. A modern host with an unmarked schema is
+ * incompatible and must be diagnosed, while old hosts keep their installer.
  */
-function installImageSettings(ctx: Context, config: Config, hooks: SettingsHooks): void {
+function installImageSettings(ctx: Context, config: Config, hooks: SettingsHooks): () => SettingsHealth {
+  let service: unknown
   ctx.inject(['settings'], settingsCtx => {
     const settings = settingsCtx.settings as SettingsForms & Partial<SettingsSectionInstaller>
-    if (typeof settings.installSection !== 'function') return
-    settings.installSection(ctx, IMAGE_GENERATION_NAMESPACE, Config, config, hooks)
+    service = settings
+    const health = describeSettingsHealth(settings, Config)
+    if (health.settings === 'live' && !health.liveSchema) {
+      ctx.logger.warn('dsh-image-gen: the loaded schema lacks volatile fields required by this DSH settings service. Install @deepseek-ai/schemastery >=3.18.4 <4 in the plugin profile and check which copy the plugin resolves; settings cannot be saved with this schema.')
+    }
+    if (typeof settings.installSection === 'function') {
+      settings.installSection(ctx, IMAGE_GENERATION_NAMESPACE, Config, config, hooks)
+    }
+    return () => { service = undefined }
   })
+  return () => describeSettingsHealth(service, Config)
 }

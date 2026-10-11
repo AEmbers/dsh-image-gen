@@ -30,7 +30,10 @@ interface Settings { provider?: string }
 describe('host-backed settings scope', () => {
   it('stays inert until a Host namespace is attached', async () => {
     const scope = createHostSettingsScope<Settings>('image-gen')
-    expect(scope.getSnapshot()).toEqual({ value: undefined, writable: false })
+    // No namespace yet: the scope answers with the same "no settings here"
+    // shape DSH's own degraded scope reports, which is what the card's
+    // diagnosis reads.
+    expect(scope.getSnapshot()).toEqual({ value: undefined, writable: false, status: 'unavailable' })
     await expect(scope.set('provider', 'google')).resolves.toBe(false)
     await expect(scope.reload()).resolves.toBeUndefined()
   })

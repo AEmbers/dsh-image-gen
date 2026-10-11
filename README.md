@@ -23,6 +23,10 @@
 </p>
 
 <p>
+  <a href="https://atomgit.com/shanliuling/dsh-image-gen"><img src="https://atomgit.com/shanliuling/dsh-image-gen/star/new_badge.svg" alt="AtomGit" height="55" /></a>
+</p>
+
+<p>
   <a href="#快速开始">快速开始</a> ·
   <a href="#核心能力">核心能力</a> ·
   <a href="#provider-支持情况">Provider 支持</a> ·
@@ -312,8 +316,8 @@ pnpm dsh plugin --profile web add ./dsh-image-gen
 | Provider           | 比例                                                              | 清晰度                                  |
 | :----------------- | :---------------------------------------------------------------- | :-------------------------------------- |
 | Google Gemini      | 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 4:5 · 5:4 · 16:9 · 9:16 · 21:9      | 1K / 2K / 4K                            |
-| OpenAI Images      | 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16                         | 自动 / low / medium / high              |
-| OpenAI Compatible  | 由 `openaiCompatSizes` 配置决定（默认 1:1 · 3:2 · 2:3）           | 同上（默认 standard）                   |
+| OpenAI Images      | gpt-image-2 系列支持 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 | 分辨率 1K / 2K（宽屏、竖屏另有 4K）；生成质量独立选择 auto / low / medium / high |
+| OpenAI Compatible  | 由 `openaiCompatSizes` 配置决定（默认 1:1 · 3:2 · 2:3）           | 分辨率由尺寸表决定；生成质量独立配置，默认不发送 |
 | ByteDance Seedream | 自动 · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 · 21:9           | 2K / 3K / 4K                            |
 | Aliyun DashScope   | 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16                         | 标准                                    |
 | xAI Grok Imagine   | 自动 · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 · 21:9           | 1K / 2K                                 |
@@ -323,7 +327,12 @@ pnpm dsh plugin --profile web add ./dsh-image-gen
 | Google 订阅        | 自动 · 1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 4:5 · 5:4 · 16:9 · 9:16 · 21:9 | 标准 / 高清（4K）                     |
 
 > 「自动」比例表示由模型按 Prompt 自行决定构图；上游已移除的档位（如 Seedream 5.0 的 1K）插件不会暴露。
-> OpenAI Compatible（中转站）的比例与清晰度由设置中的 `openaiCompatSizes` 表驱动，格式为「比例 → 档位 → 像素」，例如 `{ "16:9": { "2K": "2048x1152" } }`；留空时保持 1:1 / 3:2 / 2:3 + standard 的兼容行为。
+> Google 订阅会使用有效的平台枚举发现账号项目，并提供普通 daily 入口作为兼容回退。未返回项目时保留旧兼容项目尝试，但不会把它缓存成账号真实项目；若生图仍失败，错误会保留项目发现、账号资格及各生图入口的脱敏响应，避免只显示最后一个 429。设置中的订阅「测试连接」只检查登录记录，实际生图成功才验证该账号的生图链路；`UNSUPPORTED_CLIENT` 的 Code Assist 提示也不单独判定生图不可用。
+> OpenAI 与兼容渠道的 Studio 控件分别显示「比例 / 分辨率 / 生成质量」，分辨率选项会显示实际像素。多模型对比及再次生成也保留这两类参数。
+> OpenAI 官方可通过设置中的 `openaiSizes` 自定义尺寸表，格式为「比例 → 档位 → 像素」，例如 `{ "16:9": { "2K": "2048x1152", "4K": "3840x2160" } }`。gpt-image-2 系列按官方限制校验：边长为 16 的倍数、最大 3840、比例在 1:3 到 3:1、总像素 655360–8294400；超过 3686400 像素的输出属于上游实验支持。[官方说明](https://developers.openai.com/api/reference/resources/images/methods/generate)。旧版 GPT Image 模型仍只使用三种标准尺寸。
+> OpenAI Compatible 的尺寸表为 `openaiCompatSizes`，格式相同；留空时保持原来的标准尺寸。`openaiCompatQuality` 设置默认生成质量（留空不发送），`openaiCompatQualityOptions` 设置 Studio 可选值。选择「渠道默认（不发送）」可在单次请求中省略 quality；对话工具也支持独立的 `size` 和 `quality` 参数。
+> 兼容渠道的「文生图额外字段」对应 `openaiCompatExtraBody`，例如 `{ "watermark": false }`。它仅用于文生图，在常规字段之后合并，可覆盖同名参数；`false` 和嵌套对象都会保留。图生图继续使用 `openaiCompatEditExtra`；JSON 图片 URL 数组格式的 `openaiCompatEditSizeMode` 默认 `auto`，改为 `selected` 才发送所选尺寸，EditExtra 仍可覆盖该尺寸。
+> 工作台在比例、分辨率旁提供「可见水印：渠道默认 / 关闭 / 开启」，分别判断文生图和图生图支持情况。Seedream、通义原生 Qwen Image，以及已确认的商汤和通义官方兼容接口自动启用；官方兼容接口同时自动使用对应的 JSON 编辑格式。商汤匹配 `https://token.sensenova.cn/v1` 与 `sensenova-u1.5-lite`；通义匹配官方工作空间域名的 `/compatible-mode/v1` 与 Qwen Image 3.0/3.0 Pro、2.1 Pro/Turbo。其他兼容渠道可通过对应操作的额外字段绑定布尔值 `watermark`、`watermark_enabled` 或 `parameters.watermark`；图生图绑定仅用于 JSON 编辑格式。未知渠道和智谱显示禁用的「支持未确认」，无已确认开关的接口也显示说明。不会仅凭模型名识别未知中转。渠道默认保留原配置或省略参数，单次选择只覆盖水印字段；批量生成、支持该操作的对比模型及再次生成会保留选择。
 
 </details>
 
@@ -412,9 +421,18 @@ pnpm run typecheck
 pnpm test
 pnpm run build
 pnpm run pack:check
+pnpm run test:package
 ```
 
+新 DSH 的设置保存需要实际加载的 `@deepseek-ai/schemastery >=3.18.4 <4`。设置卡会区分加载中、宿主未提供设置、远程连接不可保存及依赖不兼容；旧 DSH 的设置接口仍保留。更新依赖时应检查插件所在 profile 的实际依赖，而不只检查源码目录。
+
+`test:package` 需要网络，会在临时目录安装当前构建的插件 tarball 和指定版本的 DSH 0.2 设置服务，通过真实 React 渲染验证卡片状态和保存处理、配置文件写入、重新打开表单和宿主重启后的读取，并验证旧 schemastery 的明确拒绝提示。图片 API、浏览器 DOM 和 RPC 传输不属于此测试；CI 同时在 Windows 和 Linux 执行。
+
 欢迎通过 [Issues](https://github.com/shanliuling/dsh-image-gen/issues) 反馈问题，或阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 后提交 Pull Request。
+
+## 鸣谢
+
+- [AtomGit](https://atomgit.com/shanliuling/dsh-image-gen)：为本项目提供国内代码托管，方便国内用户访问与获取源码。
 
 ## License
 

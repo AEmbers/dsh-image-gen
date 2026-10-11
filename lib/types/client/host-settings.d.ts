@@ -22,6 +22,15 @@ export declare const HOST_SETTINGS_CONFLICT = "settings/conflict";
 export interface HostSettingsSnapshot<T> {
     value: T | undefined;
     writable: boolean;
+    /**
+     * Sync state the settings card reads to tell "no Host settings here" from
+     * "read-only". `unavailable` until a Remote settings namespace is adopted,
+     * and absent once one answered — the card then falls back to `writable`.
+     * This is the state DSH's own degraded scope reports, so a page this scope
+     * serves announces the same diagnosis as one the Host answered with an
+     * inert settings form.
+     */
+    status?: 'loading' | 'ready' | 'unavailable';
 }
 /** Settings scope shape both surfaces consume. */
 export interface HostSettingsScope<T> {

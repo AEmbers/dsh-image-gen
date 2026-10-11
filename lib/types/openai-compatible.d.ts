@@ -32,7 +32,7 @@ export declare function generateOpenAICompatibleImage(input: {
     arkOptions?: ArkOutputOptions;
 }): Promise<GeneratedCompatibleImage>;
 /** How the edits endpoint expects its request body (#41). */
-export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'xaiJson';
+export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'xaiJson' | 'qwenJson';
 export declare function editOpenAICompatibleImage(input: {
     apiKey: string;
     baseURL: string;
@@ -49,6 +49,7 @@ export declare function editOpenAICompatibleImage(input: {
      * `images: [{ image_url }]` objects. Defaults to the standard multipart.
      */
     editFormat?: CompatEditFormat;
+    editSizeMode?: 'auto' | 'selected';
     /**
      * Channel-specific extra fields merged into the JSON edit body last (so
      * they can override the defaults above), e.g. SenseNova's
