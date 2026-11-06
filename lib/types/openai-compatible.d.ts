@@ -32,7 +32,7 @@ export declare function generateOpenAICompatibleImage(input: {
     arkOptions?: ArkOutputOptions;
 }): Promise<GeneratedCompatibleImage>;
 /** How the edits endpoint expects its request body (#41). */
-export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'xaiJson' | 'qwenJson';
+export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'siliconflowJson' | 'xaiJson' | 'qwenJson';
 export declare function editOpenAICompatibleImage(input: {
     apiKey: string;
     baseURL: string;
@@ -58,6 +58,14 @@ export declare function editOpenAICompatibleImage(input: {
     editExtra?: Readonly<Record<string, unknown>>;
     /** Vendor quality tier sent with the edit request when set. */
     quality?: string;
+    /**
+     * Multipart edit response shape. `auto` asks for inline b64_json first and
+     * retries once without the field when a relay rejects it (400/422); `url`
+     * keeps the relay default; `b64_json` never retries.
+     */
+    editResponseFormat?: 'auto' | 'b64_json' | 'url';
+    /** Called once when the relay rejects response_format and the request is retried without it. */
+    onResponseFormatRetry?: (status: number) => void;
     /**
      * Extra fields for the edit request (multipart: one form field per entry;
      * JSON shapes: merged after `editExtra`), e.g. xAI's

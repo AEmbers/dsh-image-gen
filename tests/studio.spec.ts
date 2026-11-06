@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createServer, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { EventEmitter } from 'node:events'
+import { Readable } from 'node:stream'
 import type { AddressInfo } from 'node:net'
 import { DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_SEEDREAM_MODEL, DEFAULT_DASHSCOPE_MODEL, DEFAULT_XAI_MODEL, DEFAULT_ZHIPU_MODEL } from '../src/config.js'
 import { generateFromStudio, runPool, studioProfile, describeStudio, openAIRequestSize } from '../src/studio.js'
 import { parseStudioGenerateRequest, serveStudio } from '../src/studio-route.js'
-import { SUBSCRIPTION_PROVIDERS, DEFAULT_SUBSCRIPTION_MODELS, SUBSCRIPTION_TIMEOUT_MS, STUDIO_PROVIDERS, CLOUD_IMAGE_PROVIDERS, type StudioProvider, type SubscriptionProvider } from '../src/shared.js'
+import { SUBSCRIPTION_PROVIDERS, DEFAULT_SUBSCRIPTION_MODELS, SUBSCRIPTION_TIMEOUT_MS, STUDIO_PROVIDERS, CLOUD_IMAGE_PROVIDERS, studioModelOptionsForMode, type StudioProvider, type SubscriptionProvider } from '../src/shared.js'
 import { SUBSCRIPTION_CAPABILITIES } from '../src/capabilities.js'
 import type { SubscriptionManager, SubscriptionVendor } from '../src/subscription/manager.js'
 import {
@@ -47,6 +49,20 @@ describe('multi-model comparison planning', () => {
 
   it('starts with the active provider and one additional configured model', () => {
     expect(initialComparisonProviders(profiles, 'openai')).toEqual(['openai', 'google'])
+  })
+
+  it('keeps named compat channels as independent comparison targets', () => {
+    const config = {
+      openaiCompatBaseURL: 'https://legacy.example/v1', openaiCompatModel: 'legacy-model',
+      openaiCompatChannels: [{ id: 'relay-b', label: 'Relay B', keyRef: '', baseURL: 'https://relay-b.example/v1', model: 'relay-b-model' }],
+    }
+    const channelProfiles = [
+      studioProfile(config, 'openai-compat', true, 'default'),
+      studioProfile(config, 'openai-compat', true, 'relay-b'),
+    ]
+    expect(initialComparisonProviders(channelProfiles, 'openai-compat', 'relay-b')).toEqual(['openai-compat:relay-b', 'openai-compat:default'])
+    expect(buildComparisonTargets(channelProfiles, ['openai-compat:default', 'openai-compat:relay-b'], '1:1', 'standard')
+      .map(target => target.profile.channel)).toEqual(['default', 'relay-b'])
   })
 
   it('maps unsupported shared settings to each provider default', () => {
@@ -143,6 +159,12 @@ describe('image workbench request validation', () => {
 
   it('normalizes a cloud generation request', () => {
     expect(parseStudioGenerateRequest(base)).toEqual({ ...base, prompt: 'a warm editorial portrait' })
+  })
+
+  it('accepts a compat channel id and rejects it for other providers', () => {
+    expect(parseStudioGenerateRequest({ ...base, provider: 'openai-compat', model: 'relay-image', channel: ' relay-b ' }))
+      .toMatchObject({ provider: 'openai-compat', channel: 'relay-b' })
+    expect(() => parseStudioGenerateRequest({ ...base, channel: 'relay-b' })).toThrow('仅 OpenAI 兼容 Provider 支持选择渠道')
   })
 
   it('requires a valid reference for image editing', () => {
@@ -585,6 +607,9 @@ describe('conversation and gallery image regeneration', () => {
     expect(conversationRegenerateRequest({
       provider: 'dashscope', model: DEFAULT_DASHSCOPE_MODEL, output: '928*1664',
     }, 'another version')).toMatchObject({ ratio: '9:16', quality: 'standard' })
+    expect(conversationRegenerateRequest({
+      provider: 'openai-compat', channel: 'relay-b', model: 'relay-image', output: '1024x1024',
+    }, 'another version')).toMatchObject({ provider: 'openai-compat', channel: 'relay-b' })
   })
 
   it('supports gallery items with undefined output and explicit ratio/quality', () => {
@@ -1200,6 +1225,79 @@ describe('openai-compat size table', () => {
   })
 })
 
+describe('openai-compat model choices', () => {
+  const config = {
+    openaiCompatBaseURL: 'https://relay.example/v1',
+    openaiCompatModel: 'image-2',
+    openaiCompatModels: ['image-2.5', 'image-2'],
+  }
+
+  it('exposes the configured list and falls back to the legacy single model', () => {
+    const current = studioProfile(config, 'openai-compat', true)
+    expect(current.model).toBe('image-2')
+    expect(studioModelOptionsForMode(current, 'generate').map(option => option.value)).toEqual(['image-2.5', 'image-2'])
+    const legacy = studioProfile({ openaiCompatBaseURL: config.openaiCompatBaseURL, openaiCompatModel: config.openaiCompatModel }, 'openai-compat', true)
+    expect(studioModelOptionsForMode(legacy, 'generate').map(option => option.value)).toEqual(['image-2'])
+  })
+
+  it('keeps the independent edit model ahead of the generation list', () => {
+    const editing = studioProfile({ ...config, openaiCompatEditModel: 'image-edit' }, 'openai-compat', true)
+    expect(studioModelOptionsForMode(editing, 'edit').map(option => option.value)).toEqual(['image-edit'])
+    expect(studioModelOptionsForMode(editing, 'generate').map(option => option.value)).toEqual(['image-2.5', 'image-2'])
+  })
+})
+
+describe('openai-compat named channels', () => {
+  const config = {
+    provider: 'openai-compat' as const,
+    openaiCompatLabel: 'Legacy relay',
+    openaiCompatBaseURL: 'https://legacy.example/v1',
+    openaiCompatModel: 'legacy-model',
+    openaiCompatModels: ['legacy-model'],
+    openaiCompatChannels: [{
+      id: 'relay-b', label: 'Relay B', keyRef: '', baseURL: 'https://relay-b.example/v1', model: 'relay-b-model',
+      models: ['relay-b-model'], quality: 'high', qualityOptions: ['low', 'high'], extraBody: { watermark: false },
+      sizes: { '16:9': { '2K': '2048x1152' } },
+    }],
+    openaiCompatActiveChannel: 'relay-b',
+    saveToWorkspace: false,
+  }
+
+  it('describes every channel and resolves credential status independently', async () => {
+    const ctx = studioCtx()
+    ctx.credentials.resolve.mockImplementation(async (ref: unknown) => JSON.stringify(ref).includes('RELAY_B') ? { value: 'key-b' } : undefined)
+    const described = await describeStudio(ctx, config)
+    expect(described.activeProvider).toBe('openai-compat')
+    expect(described.activeChannel).toBe('relay-b')
+    expect(described.providers.filter(profile => profile.provider === 'openai-compat').map(profile => ({
+      channel: profile.channel, label: profile.label, model: profile.model, configured: profile.configured,
+    }))).toEqual([
+      { channel: 'default', label: 'Legacy relay', model: 'legacy-model', configured: false },
+      { channel: 'relay-b', label: 'Relay B', model: 'relay-b-model', configured: true },
+    ])
+  })
+
+  it('uses only the selected channel endpoint, credential and generation fields', async () => {
+    const ctx = studioCtx()
+    ctx.credentials.resolve.mockImplementation(async (ref: unknown) => ({ value: JSON.stringify(ref).includes('RELAY_B') ? 'key-b' : 'legacy-key' }))
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ data: [{ b64_json: TINY_PNG }] }), { headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetch)
+    try {
+      const result = await generateFromStudio(ctx, config, {
+        mode: 'generate', provider: 'openai-compat', channel: 'relay-b', model: 'relay-b-model', prompt: 'lake',
+        ratio: '16:9', quality: '2K', generationQuality: 'high',
+      }, new AbortController().signal)
+      expect(result.channel).toBe('relay-b')
+      const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit]
+      expect(url).toBe('https://relay-b.example/v1/images/generations')
+      expect(init.headers).toMatchObject({ authorization: 'Bearer key-b' })
+      expect(JSON.parse(String(init.body))).toEqual({ model: 'relay-b-model', prompt: 'lake', size: '2048x1152', quality: 'high', watermark: false })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
 describe('OpenAI studio dimensions, quality and generation extras (#73, #74)', () => {
   const signal = new AbortController().signal
   const relayConfig = { openaiCompatModel: 'relay-image', openaiCompatBaseURL: 'https://relay.example/v1', openaiCompatSizes: { '16:9': { '2K': '2048x1152' } }, saveToWorkspace: false }
@@ -1229,6 +1327,14 @@ describe('OpenAI studio dimensions, quality and generation extras (#73, #74)', (
     const { ctx, fetch } = setup()
     await generateFromStudio(ctx, relayConfig, { mode: 'generate', provider: 'openai-compat', model: 'relay-image', prompt: 'lake', ratio: '16:9', quality: '2K' }, signal)
     expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toEqual({ model: 'relay-image', prompt: 'lake', size: '2048x1152' })
+  })
+  it('sends a selected configured model and rejects models outside the list', async () => {
+    const { ctx, fetch } = setup()
+    const config = { ...relayConfig, openaiCompatModels: ['relay-image', 'relay-image-2.5'] }
+    await generateFromStudio(ctx, config, { mode: 'generate', provider: 'openai-compat', model: 'relay-image-2.5', prompt: 'lake', ratio: '16:9', quality: '2K' }, signal)
+    expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toMatchObject({ model: 'relay-image-2.5' })
+    await expect(generateFromStudio(ctx, config, { mode: 'generate', provider: 'openai-compat', model: 'unlisted-model', prompt: 'lake', ratio: '16:9', quality: '2K' }, signal)).rejects.toThrow('模型配置已变化')
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
   it.each(['multipart', 'formReferenceImages', 'jsonImageUrlArray'] as const)('forwards quality through %s edits without leaking generation extras', async editFormat => {
     const { ctx, fetch } = setup()
@@ -1367,6 +1473,54 @@ describe('workbench watermark request mapping', () => {
 })
 
 describe('streaming generation heartbeat', () => {
+  it.each([
+    ...CLOUD_IMAGE_PROVIDERS.map(provider => ({ provider, timeoutMs: 240_000, expectedMs: 240_000 })),
+    { provider: 'google' as const, timeoutMs: 5_000, expectedMs: 5_000 },
+    { provider: 'google' as const, timeoutMs: undefined, expectedMs: 150_000 },
+    ...SUBSCRIPTION_PROVIDERS.map(provider => ({ provider, timeoutMs: 5_000, expectedMs: 300_000 })),
+  ])('uses the generation timeout budget for $provider ($timeoutMs)', async ({ provider, timeoutMs, expectedMs }) => {
+    vi.useFakeTimers()
+    try {
+      const req = Object.assign(Readable.from([JSON.stringify({
+        mode: 'generate', provider, model: 'test-model', prompt: 'lake', ratio: '1:1', quality: '1K',
+      })]), { method: 'POST', headers: { 'content-type': 'application/json' } }) as unknown as IncomingMessage
+      const res = Object.assign(new EventEmitter(), {
+        writeHead: vi.fn(), write: vi.fn(), end: vi.fn(),
+        destroyed: false, writableEnded: false,
+      })
+      let generationSignal!: AbortSignal
+      let started!: () => void
+      const generating = new Promise<void>(resolve => { started = resolve })
+      const serving = serveStudio(req, res as unknown as ServerResponse, {
+        describe: async () => ({ providers: [], activeProvider: 'google' }),
+        generate: (_input, signal) => {
+          generationSignal = signal
+          started()
+          return new Promise((_, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+          })
+        },
+        maxBodyBytes: 1024,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      })
+      await generating
+      await vi.advanceTimersByTimeAsync(expectedMs - 1)
+      expect(generationSignal.aborted).toBe(false)
+      expect(res.end).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(generationSignal.aborted).toBe(true)
+      await serving
+      const budget = SUBSCRIPTION_PROVIDERS.includes(provider as SubscriptionProvider)
+        ? `订阅通道 ${String(expectedMs / 1000)}` : String(expectedMs / 1000)
+      const error = JSON.parse(res.end.mock.calls[0]![0] as string).error as string
+      expect(error).toContain(`（${budget} 秒未返回）`)
+      expect(error).toContain('上游可能已扣费或仍在生成，请到服务商后台确认')
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
   it('sends headers plus heartbeat newlines while generating, then a parseable JSON body', async () => {
     const server = createServer()
     const url = await new Promise<string>((resolve) => {

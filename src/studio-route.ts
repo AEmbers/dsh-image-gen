@@ -2,7 +2,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { parseImageAttachmentRef } from './reference-image.js'
+import { UPSTREAM_TIMEOUT_HINT } from './generation-timeout.js'
 import {
+  DEFAULT_CLOUD_TIMEOUT_MS,
   isStudioProvider,
   STUDIO_PROVIDERS,
   STUDIO_WATERMARK_VALUES,
@@ -19,6 +21,7 @@ export interface StudioRouteDeps {
   describe(): Promise<StudioConfigResponse>
   generate(input: StudioGenerateRequest, signal: AbortSignal): Promise<StudioGenerateResponse>
   maxBodyBytes: number
+  timeoutMs?: number
   /** Heartbeat cadence for the streaming generation response; tests shrink it. */
   heartbeatMs?: number
 }
@@ -42,10 +45,8 @@ export async function serveStudio(req: IncomingMessage, res: ServerResponse, dep
   // Upstream watchdog: a stalled provider must fail loudly instead of pinning
   // the browser spinner until undici's default 300s headers timeout fires.
   // Subscription channels are slower (especially Antigravity), so they get the
-  // shared SUBSCRIPTION_TIMEOUT_MS budget instead of the cloud 150s.
+  // shared SUBSCRIPTION_TIMEOUT_MS budget instead of the cloud setting.
   const watchdog = new AbortController()
-  const CLOUD_WATCHDOG_MS = 150_000
-  let subscriptionChannel = false
   const signal = AbortSignal.any([controller.signal, watchdog.signal])
   const onConnectionClose = () => {
     if (!res.writableEnded) {
@@ -67,10 +68,11 @@ export async function serveStudio(req: IncomingMessage, res: ServerResponse, dep
       return jsonError(res, 400, errorMessage(error, 'invalid-request'))
     }
     // Watchdog arms per channel: subscriptions get the longer subscription
-    // budget; API-key providers keep the original 150s.
-    subscriptionChannel = isSubscriptionProvider(input.provider)
-    const timeoutMs = subscriptionChannel ? SUBSCRIPTION_TIMEOUT_MS : CLOUD_WATCHDOG_MS
-    setTimeout(() => { watchdog.abort() }, timeoutMs).unref?.()
+    // budget; API-key providers use the configured cloud timeout.
+    const subscriptionChannel = isSubscriptionProvider(input.provider)
+    const timeoutMs = subscriptionChannel ? SUBSCRIPTION_TIMEOUT_MS : (deps.timeoutMs ?? DEFAULT_CLOUD_TIMEOUT_MS)
+    const timeout = setTimeout(() => { watchdog.abort() }, timeoutMs)
+    timeout.unref?.()
     // Respond with headers immediately and heartbeat newlines while the
     // provider works: reverse proxies (openresty defaults to 60s) reset
     // proxy_read_timeout on every upstream byte, so long generations survive
@@ -92,13 +94,14 @@ export async function serveStudio(req: IncomingMessage, res: ServerResponse, dep
         if (res.destroyed || res.writableEnded) return
         const message = watchdog.signal.aborted
           ? subscriptionChannel
-            ? '上游生成超时（订阅通道 300 秒未返回），请稍后重试'
-            : '上游生成超时（150 秒未返回），请检查网络或代理后重试'
+            ? `上游生成超时（订阅通道 ${String(Math.round(timeoutMs / 1000))} 秒未返回），请稍后重试；${UPSTREAM_TIMEOUT_HINT}`
+            : `上游生成超时（${String(Math.round(timeoutMs / 1000))} 秒未返回），请检查网络或代理后重试；${UPSTREAM_TIMEOUT_HINT}`
           : errorMessage(error, 'generation-failed')
         res.end(JSON.stringify({ error: message }))
       }
     } finally {
       clearInterval(heartbeat)
+      clearTimeout(timeout)
     }
   } catch (error) {
     if (res.headersSent || res.writableEnded || res.destroyed) {
@@ -118,6 +121,8 @@ export function parseStudioGenerateRequest(value: unknown): StudioGenerateReques
   if (input === undefined) throw new Error('请求格式无效')
   if (input.mode !== 'generate' && input.mode !== 'edit') throw new Error('请选择生成类型')
   if (!studioProvider(input.provider)) throw new Error('不支持该图像 Provider')
+  if (input.channel !== undefined && input.provider !== 'openai-compat') throw new Error('仅 OpenAI 兼容 Provider 支持选择渠道')
+  const channel = input.channel === undefined ? undefined : requiredText(input.channel, '请选择渠道', 100)
   const prompt = requiredText(input.prompt, '请输入提示词')
   const model = requiredText(input.model, '请选择模型', 200)
   const ratio = requiredText(input.ratio, '请选择比例', 32)
@@ -147,6 +152,7 @@ export function parseStudioGenerateRequest(value: unknown): StudioGenerateReques
   return {
     mode: input.mode,
     provider: input.provider,
+    ...(channel === undefined ? {} : { channel }),
     model,
     prompt,
     ratio,

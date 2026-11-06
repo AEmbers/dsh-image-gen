@@ -10,6 +10,8 @@ export interface TlLandingItem {
     attachment: ImageAttachmentRef;
     /** Live conversation delivery; discard unfinished delivery when all canvases close. */
     fromConversation?: boolean;
+    /** Explicit history actions must not resume after the last canvas closes. */
+    onlyWhileCanvasOpen?: boolean;
     /**
      * Generation provenance copied onto the landed shape's meta: the canvas
      * digest then tells the model how each image was made, so "regenerate this"
@@ -21,6 +23,10 @@ export interface TlLandingItem {
     model?: string;
 }
 type TlLandingConsumer = (items: readonly TlLandingItem[]) => Promise<boolean>;
+/** History actions must not silently queue into a canvas that is not open. */
+export declare function hasTlLandingConsumer(): boolean;
+export declare function subscribeTlLandingAvailability(listener: () => void): () => void;
+export declare function sendTlLandingToOpenCanvas(item: TlLandingItem): boolean;
 /** Invalidates async landings that started before the user cleared the canvas. */
 export declare function getTlLandingGeneration(): number;
 export declare function clearTlLandings(): void;

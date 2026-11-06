@@ -3,6 +3,48 @@ import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attach
 
 /** Browser route used by the generated-image card. */
 export const IMAGE_ROUTE = '/plugins/dsh-image-gen/image'
+
+/** Encode a durable image reference for the cacheable GET form of IMAGE_ROUTE. */
+export function encodeImageRef(ref: ImageAttachmentRef): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(ref))
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/** Decode a GET query value; the caller supplies the reference parser. */
+export function decodeImageRef(value: string, parse: (input: unknown) => ImageAttachmentRef | undefined): ImageAttachmentRef | undefined {
+  try {
+    const base64 = value.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4)
+    const binary = atob(padded)
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0))
+    return parse(JSON.parse(new TextDecoder().decode(bytes)))
+  } catch {
+    return undefined
+  }
+}
+
+/** Same-origin GET URL for one attachment; safe to put in an <img src>. */
+export function imageUrlFor(ref: ImageAttachmentRef): string {
+  return IMAGE_ROUTE + '?ref=' + encodeImageRef(ref)
+}
+
+/** Same-origin GET URL for a host-rendered thumbnail of one attachment. */
+export function thumbUrlFor(ref: ImageAttachmentRef, width = 320): string {
+  return THUMB_ROUTE + '?w=' + String(width) + '&ref=' + encodeImageRef(ref)
+}
+
+/** Mid-size preview used by the lightbox; originals stay for copy/download/drag. */
+export function previewUrlFor(ref: ImageAttachmentRef): string {
+  return PREVIEW_ROUTE + '?ref=' + encodeImageRef(ref)
+}
+
+/** Content-addressed raw copy, served when the attachment layer normalized the import. */
+export function vaultUrlFor(key: string, mediaType?: string): string {
+  const base = VAULT_ROUTE + '?key=' + encodeURIComponent(key)
+  return mediaType === undefined ? base : base + '&mediaType=' + encodeURIComponent(mediaType)
+}
 /** Browser route that uploads user-picked images as DSH attachments. */
 export const IMPORT_ROUTE = '/plugins/dsh-image-gen/import'
 /** Browser route used for deleting generated images and workspace files. */
@@ -13,6 +55,17 @@ export const STUDIO_ROUTE = '/plugins/dsh-image-gen/studio'
 export const INSPIRATION_ROUTE = '/plugins/dsh-image-gen/inspiration'
 /** Browser route used for saving generated images to workspace on demand. */
 export const SAVE_WORKSPACE_ROUTE = '/plugins/dsh-image-gen/save-workspace'
+/** Browser route that streams a ZIP export of the selected gallery images. */
+export const ZIP_ROUTE = '/plugins/dsh-image-gen/zip'
+/** Browser route that serves host-rendered gallery thumbnails. */
+export const THUMB_ROUTE = '/plugins/dsh-image-gen/thumb'
+export const PREVIEW_ROUTE = '/plugins/dsh-image-gen/preview'
+export const VAULT_ROUTE = '/plugins/dsh-image-gen/vault'
+export const VAULT_REFS_ROUTE = '/plugins/dsh-image-gen/vault-refs'
+export const VAULT_DELETE_ROUTE = '/plugins/dsh-image-gen/vault-delete'
+export const ZIP_PROGRESS_ROUTE = '/plugins/dsh-image-gen/zip/progress'
+export const ZIP_CANCEL_ROUTE = '/plugins/dsh-image-gen/zip/cancel'
+export const STORAGE_STATS_ROUTE = '/plugins/dsh-image-gen/storage-stats'
 /** Browser route the settings card probes provider connectivity through. */
 export const TEST_CONNECTION_ROUTE = '/plugins/dsh-image-gen/test'
 /** Non-secret settings capability probe, available even when the host cannot serve a form. */
@@ -166,6 +219,116 @@ export const COMFYUI_STUDIO_PREFIX = 'comfyui:'
 /** A workbench row id owned by one imported ComfyUI workflow. */
 export type ComfyUIStudioProvider = `comfyui:${string}`
 
+/** Normalize the relay model list while keeping the legacy default model selectable. */
+export function resolveOpenAICompatModels(config: {
+  openaiCompatModel?: string
+  openaiCompatModels?: readonly string[]
+}): string[] {
+  const defaultModel = config.openaiCompatModel?.trim() ?? ''
+  const models = [...new Set((config.openaiCompatModels ?? []).map(model => model.trim()).filter(Boolean))]
+  if (defaultModel.length > 0 && !models.includes(defaultModel)) models.unshift(defaultModel)
+  return models
+}
+
+export const DEFAULT_OPENAI_COMPAT_CHANNEL_ID = 'default'
+
+export interface OpenAICompatChannel {
+  id: string
+  label: string
+  keyRef: string
+  baseURL: string
+  model: string
+  models?: string[]
+  editModel?: string
+  quality?: string
+  qualityOptions?: string[]
+  extraBody?: Record<string, unknown>
+  editSizeMode?: 'auto' | 'selected'
+  editFormat?: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'siliconflowJson'
+  editExtra?: Record<string, unknown>
+  sizes?: Record<string, Record<string, string>>
+}
+
+export interface OpenAICompatChannelSource {
+  openaiCompatLabel?: string
+  openaiCompatBaseURL?: string
+  openaiCompatModel?: string
+  openaiCompatModels?: readonly string[]
+  openaiCompatEditModel?: string
+  openaiCompatQuality?: string
+  openaiCompatQualityOptions?: readonly string[]
+  openaiCompatExtraBody?: Record<string, unknown>
+  openaiCompatEditSizeMode?: 'auto' | 'selected'
+  openaiCompatEditFormat?: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'siliconflowJson'
+  openaiCompatEditExtra?: Record<string, unknown>
+  openaiCompatSizes?: Record<string, Record<string, string>>
+  openaiCompatChannels?: readonly OpenAICompatChannel[]
+  openaiCompatActiveChannel?: string
+}
+
+export function openAICompatKeyRef(channelId: string): string {
+  return channelId === DEFAULT_OPENAI_COMPAT_CHANNEL_ID
+    ? OPENAI_COMPAT_API_KEY_ENV
+    : `${OPENAI_COMPAT_API_KEY_ENV}_${channelId.replace(/[^A-Za-z0-9]/g, '_').toUpperCase()}`
+}
+
+/** The legacy flat fields remain the first channel; additional entries are fully independent. */
+export function resolveOpenAICompatChannels(source: OpenAICompatChannelSource): OpenAICompatChannel[] {
+  const legacy: OpenAICompatChannel = {
+    id: DEFAULT_OPENAI_COMPAT_CHANNEL_ID,
+    label: source.openaiCompatLabel?.trim() || 'OpenAI 兼容',
+    keyRef: OPENAI_COMPAT_API_KEY_ENV,
+    baseURL: source.openaiCompatBaseURL ?? '',
+    model: source.openaiCompatModel ?? '',
+    models: [...source.openaiCompatModels ?? []],
+    editModel: source.openaiCompatEditModel ?? '',
+    quality: source.openaiCompatQuality ?? '',
+    qualityOptions: [...source.openaiCompatQualityOptions ?? []],
+    extraBody: source.openaiCompatExtraBody ?? {},
+    editSizeMode: source.openaiCompatEditSizeMode ?? 'auto',
+    editFormat: source.openaiCompatEditFormat ?? 'multipart',
+    editExtra: source.openaiCompatEditExtra ?? {},
+    sizes: source.openaiCompatSizes ?? {},
+  }
+  const channels = [legacy]
+  const seen = new Set([legacy.id])
+  for (const [index, entry] of (source.openaiCompatChannels ?? []).entries()) {
+    const id = typeof entry?.id === 'string' ? entry.id.trim() : ''
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id) || seen.has(id)) continue
+    seen.add(id)
+    const storedKeyRef = typeof entry.keyRef === 'string' ? entry.keyRef.trim() : ''
+    channels.push({
+      id,
+      label: typeof entry.label === 'string' && entry.label.trim().length > 0 ? entry.label.trim() : `OpenAI 兼容 ${index + 2}`,
+      keyRef: /^DSH_IMAGE_GEN_OPENAI_COMPAT_KEY_[A-Z0-9_]+$/.test(storedKeyRef) ? storedKeyRef : openAICompatKeyRef(id),
+      baseURL: typeof entry.baseURL === 'string' ? entry.baseURL : '',
+      model: typeof entry.model === 'string' ? entry.model : '',
+      models: Array.isArray(entry.models) ? entry.models.filter((model): model is string => typeof model === 'string') : [],
+      editModel: typeof entry.editModel === 'string' ? entry.editModel : '',
+      quality: typeof entry.quality === 'string' ? entry.quality : '',
+      qualityOptions: Array.isArray(entry.qualityOptions) ? entry.qualityOptions.filter((quality): quality is string => typeof quality === 'string') : [],
+      extraBody: entry.extraBody ?? {},
+      editSizeMode: entry.editSizeMode === 'selected' ? 'selected' : 'auto',
+      editFormat: entry.editFormat ?? 'multipart',
+      editExtra: entry.editExtra ?? {},
+      sizes: entry.sizes ?? {},
+    })
+  }
+  return channels
+}
+
+export function resolveOpenAICompatChannel(source: OpenAICompatChannelSource, channelId?: string): OpenAICompatChannel {
+  const channels = resolveOpenAICompatChannels(source)
+  const explicit = channelId?.trim() ?? ''
+  if (explicit.length > 0) {
+    const selected = channels.find(channel => channel.id === explicit)
+    if (selected === undefined) throw new Error(`Unknown OpenAI-compatible channel "${explicit}". Available channels: ${channels.map(channel => channel.id).join(', ')}.`)
+    return selected
+  }
+  const active = source.openaiCompatActiveChannel?.trim() ?? ''
+  return channels.find(channel => channel.id === active) ?? channels[0]!
+}
+
 /**
  * Providers the browser workbench can drive: the BYOK cloud set, the logged-in
  * subscription channels, and the local ComfyUI provider.
@@ -198,10 +361,17 @@ export function isComfyUIStudioProvider(provider: string): provider is 'comfyui'
   return provider === 'comfyui' || provider.startsWith(COMFYUI_STUDIO_PREFIX)
 }
 
+export function studioTargetKey(provider: StudioProvider, channel?: string): string {
+  return channel === undefined ? provider : `${provider}:${channel}`
+}
+
 /** True when the provider is selectable in the browser workbench. */
 export function isStudioProvider(provider: string): provider is StudioProvider {
   return (STUDIO_PROVIDERS as readonly string[]).includes(provider) || isComfyUIStudioProvider(provider)
 }
+
+/** Default timeout for API-key cloud generation in the browser workbench. */
+export const DEFAULT_CLOUD_TIMEOUT_MS = 150_000
 
 /** Timeout for one subscription image call, shared by the tool path and the
  * studio route so neither drifts from the other. */
@@ -288,8 +458,14 @@ export interface StudioWatermarkCapability {
 /** Browser-safe provider description. Credentials and endpoints never cross this boundary. */
 export interface StudioProviderProfile {
   provider: StudioProvider
+  /** OpenAI-compatible channel id; absent for every other provider. */
+  channel?: string
   label: string
   model: string
+  /** Separate configured edit model; absent preserves the generation model. */
+  editModel?: string
+  /** Selectable generation models; absent means the single default model. */
+  modelOptions?: StudioOption[]
   configured: boolean
   supportsEditing: boolean
   ratioOptions: StudioOption[]
@@ -305,6 +481,18 @@ export interface StudioProviderProfile {
   /** Generation options retained for clients predating operation-specific capabilities. */
   watermarkOptions?: StudioOption[]
   watermarkCapabilities?: Record<'generate' | 'edit', StudioWatermarkCapability>
+}
+
+/** A model picker/request must use the same operation-specific default. */
+export function studioModelForMode(profile: StudioProviderProfile, mode: 'generate' | 'edit'): string {
+  return mode === 'edit' ? profile.editModel ?? profile.model : profile.model
+}
+
+export function studioModelOptionsForMode(profile: StudioProviderProfile, mode: 'generate' | 'edit'): StudioOption[] {
+  if (mode === 'edit' && profile.editModel !== undefined) {
+    return [{ value: profile.editModel, label: profile.editModel }]
+  }
+  return profile.modelOptions ?? [{ value: profile.model, label: profile.model }]
 }
 
 export function studioWatermarkCapability(profile: StudioProviderProfile | undefined, mode: 'generate' | 'edit'): StudioWatermarkCapability {
@@ -325,6 +513,7 @@ export interface StudioWorkspaceInfo {
 export interface StudioConfigResponse {
   providers: StudioProviderProfile[]
   activeProvider: StudioProvider
+  activeChannel?: string
   workspaceRoot?: string | undefined
   workspaces?: StudioWorkspaceInfo[] | undefined
 }
@@ -347,6 +536,7 @@ export type StudioReference = StudioEncodedReference | StudioAttachmentReference
 export interface StudioGenerateRequest {
   mode: 'generate' | 'edit'
   provider: StudioProvider
+  channel?: string
   model: string
   prompt: string
   ratio: string
@@ -376,6 +566,7 @@ export interface StudioGenerateResponse extends StudioGeneratedItem {
    * `comfyui` provider with that workflow as the model.
    */
   provider: ImageProvider
+  channel?: string
   model: string
   prompt: string
   createdAt: number

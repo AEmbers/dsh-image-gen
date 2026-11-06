@@ -5,6 +5,7 @@ import {
   ASPECT_RATIOS,
   IMAGE_SIZES,
   resolveProvider,
+  withOpenAICompatChannel,
   withProviderOverrides,
   type AspectRatio,
   type Config,
@@ -25,7 +26,11 @@ import {
   comfyUIStudioProvider,
   isComfyUIStudioProvider,
   isSubscriptionProvider,
+  resolveOpenAICompatChannel,
+  resolveOpenAICompatChannels,
+  resolveOpenAICompatModels,
   studioWatermarkCapability,
+  studioModelOptionsForMode,
   type CloudImageProvider,
   type ImageProvider,
   type StudioConfigResponse,
@@ -148,11 +153,19 @@ export async function describeStudio(
   config: Config,
   subscriptions?: SubscriptionManager | undefined,
 ): Promise<StudioConfigResponse> {
-  const configuredEntries = await Promise.all(CLOUD_IMAGE_PROVIDERS.map(async provider => {
-    return [provider, await resolveApiKey(ctx, provider) !== undefined] as const
-  }))
-  const configured = Object.fromEntries(configuredEntries) as Record<CloudImageProvider, boolean>
-  const cloudProfiles = CLOUD_IMAGE_PROVIDERS.map(provider => studioProfile(config, provider, configured[provider]))
+  const compatChannels = resolveOpenAICompatChannels(config)
+  const configuredEntries = await Promise.all([
+    ...CLOUD_IMAGE_PROVIDERS.filter(provider => provider !== 'openai-compat').map(async provider => {
+      return [provider, await resolveApiKey(ctx, provider) !== undefined] as const
+    }),
+    ...compatChannels.map(async channel => {
+      return [`openai-compat:${channel.id}`, await resolveApiKey(ctx, 'openai-compat', channel.keyRef) !== undefined] as const
+    }),
+  ])
+  const configured = Object.fromEntries(configuredEntries) as Record<string, boolean>
+  const cloudProfiles = CLOUD_IMAGE_PROVIDERS.flatMap(provider => provider === 'openai-compat'
+    ? compatChannels.map(channel => studioProfile(config, provider, configured[`openai-compat:${channel.id}`] === true, channel.id))
+    : [studioProfile(config, provider, configured[provider] === true)])
   // Subscription profiles: configured means "signed in", and the parameter
   // matrix collapses to a single channel-default pair (prompt-only channels).
   const subStatuses = await Promise.all(SUBSCRIPTION_PROVIDERS.map(async provider => {
@@ -163,7 +176,12 @@ export async function describeStudio(
     return subscriptionStudioProfile(provider, signedIn)
   })
   const profiles = [...cloudProfiles, ...subProfiles, ...comfyUIStudioProfiles(config)]
-  return { providers: profiles, activeProvider: activeStudioProvider(config, profiles) }
+  const activeProvider = activeStudioProvider(config, profiles)
+  const activeChannel = activeProvider === 'openai-compat'
+    ? profiles.find(profile => profile.provider === activeProvider && profile.channel === resolveOpenAICompatChannel(config).id)?.channel
+      ?? profiles.find(profile => profile.provider === activeProvider)?.channel
+    : undefined
+  return { providers: profiles, activeProvider, ...(activeChannel === undefined ? {} : { activeChannel }) }
 }
 
 /**
@@ -232,14 +250,16 @@ export async function generateFromStudio(
     assertAllowed(subProfile, input)
     return generateSubscriptionFromStudio(ctx, subscriptions, input, signal)
   }
-  const profile = studioProfile(config, input.provider, true)
+  const channel = input.provider === 'openai-compat' ? resolveOpenAICompatChannel(config, input.channel) : undefined
+  const requestConfig = input.provider === 'openai-compat' ? withOpenAICompatChannel(config, input.channel) : config
+  const profile = studioProfile(requestConfig, input.provider, true, channel?.id)
   assertAllowed(profile, input)
-  const active = resolveProvider(withProviderOverrides(config, input.provider, input.model))
+  const active = resolveProvider(withProviderOverrides(requestConfig, input.provider, input.model))
   if (active.provider === 'comfyui') throw new Error('ComfyUI 暂未接入工作台')
   if (isSubscriptionProvider(active.provider)) throw new Error('订阅生图应通过订阅渠道执行')
   // ComfyUI is rejected above; subscription channels were routed earlier; narrow for the closures below.
   const wired = active
-  const credential = await requireApiKey(ctx, input.provider)
+  const credential = await requireApiKey(ctx, input.provider, undefined, channel?.keyRef)
 
   const rawRefs = input.references ?? (input.reference ? [input.reference] : [])
   if (input.mode === 'edit' && rawRefs.length === 0) {
@@ -259,33 +279,33 @@ export async function generateFromStudio(
       const aspectRatio = input.ratio as AspectRatio
       const imageSize = input.quality as ImageSize
       generated = input.mode === 'edit'
-        ? await editGoogleImage({ apiKey: credential, endpoint: wired.endpoint, model: wired.model, prompt: input.prompt, sourceImages, aspectRatio, imageSize, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal })
-        : await generateGoogleImage({ apiKey: credential, endpoint: wired.endpoint, model: wired.model, prompt: input.prompt, aspectRatio, imageSize, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal })
+        ? await editGoogleImage({ apiKey: credential, endpoint: wired.endpoint, native: wired.native, model: wired.model, prompt: input.prompt, sourceImages, aspectRatio, imageSize, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal })
+        : await generateGoogleImage({ apiKey: credential, endpoint: wired.endpoint, native: wired.native, model: wired.model, prompt: input.prompt, aspectRatio, imageSize, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal })
       output = `${aspectRatio}, ${imageSize}`
     } else if (wired.provider === 'openai' || wired.provider === 'openai-compat' || wired.provider === 'xai' || wired.provider === 'zhipu') {
       // openai-compat keeps its configured relay table; the others resolve via
       // the capability table. xAI speaks aspect_ratio+resolution, not size.
       const p = wired.provider
-      const officialTable = p === 'openai' ? officialSizeTable(config, wired.model) : undefined
+      const officialTable = p === 'openai' ? officialSizeTable(requestConfig, wired.model) : undefined
       const officialResolution = input.resolution ?? (officialTable
         ? openAICompatTable({ openaiCompatSizes: officialTable }).find(group => group.ratio === input.ratio)?.tiers[0]?.tier
         : undefined) ?? '1K'
-      const size = p === 'openai-compat' ? openAIRequestSize(config, input.ratio, input.resolution ?? input.quality)
+      const size = p === 'openai-compat' ? openAIRequestSize(requestConfig, input.ratio, input.resolution ?? input.quality)
         : p === 'openai' ? openAIRequestSize({ openaiCompatSizes: officialTable! }, input.ratio, officialResolution)
         : p === 'xai' ? undefined
         : CLOUD_CAPABILITIES[p].sizeFor?.(input.ratio, input.quality)
       if (p === 'openai' && size !== undefined) validateOfficialSize(wired.model, size)
       const requestedQuality = input.generationQuality ?? input.quality
       const quality = p === 'openai' ? (requestedQuality === 'auto' ? undefined : requestedQuality)
-        : p === 'openai-compat' ? compatRequestQuality(config, input.generationQuality)
+        : p === 'openai-compat' ? compatRequestQuality(requestConfig, input.generationQuality)
         : p === 'zhipu' ? 'hd'
         : undefined
       const extraBody = p === 'xai' ? { aspect_ratio: input.ratio, resolution: input.quality }
         : p === 'openai-compat' ? input.mode === 'generate'
-          ? compatGenerationExtraBody(config, input.watermark) : compatEditExtraBody(config, input.watermark)
+          ? compatGenerationExtraBody(requestConfig, input.watermark) : compatEditExtraBody(requestConfig, input.watermark)
         : undefined
       generated = input.mode === 'edit'
-        ? await editOpenAICompatibleImage({ apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, sourceImages, ...(size === undefined ? {} : { size }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, ...(quality === undefined ? {} : { quality }), ...(extraBody === undefined ? {} : { extraBody }), ...(p === 'openai-compat' ? { editFormat: wired.editFormat, editExtra: wired.editExtra, editSizeMode: config.openaiCompatEditSizeMode ?? 'auto' } : p === 'xai' ? { editFormat: 'xaiJson' as const } : {}) })
+        ? await editOpenAICompatibleImage({ apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, sourceImages, ...(size === undefined ? {} : { size }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, ...(quality === undefined ? {} : { quality }), ...(extraBody === undefined ? {} : { extraBody }), ...(p === 'openai-compat' ? { editFormat: wired.editFormat, editExtra: wired.editExtra, editSizeMode: requestConfig.openaiCompatEditSizeMode ?? 'auto' } : p === 'xai' ? { editFormat: 'xaiJson' as const } : {}) })
         : await generateOpenAICompatibleImage({ provider: p, apiKey: credential, baseURL: wired.baseURL, model: wired.model, prompt: input.prompt, ...(size === undefined ? {} : { size }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, ...(quality === undefined ? {} : { quality }), ...(extraBody === undefined ? {} : { extraBody }) })
       output = size ?? `${input.ratio}, ${input.quality}`
     } else if (wired.provider === 'seedream') {
@@ -324,7 +344,7 @@ export async function generateFromStudio(
     }
   }
 
-  return await runStudioBatch(input, input.provider, startedAt, 2, generateSingle)
+  return await runStudioBatch(input, input.provider, startedAt, 2, generateSingle, channel?.id)
 }
 
 /**
@@ -334,6 +354,7 @@ export async function generateFromStudio(
  * @param startedAt - request start, for the elapsed time.
  * @param concurrency - workers to run at once; a local GPU takes 1.
  * @param generateSingle - generates and stores one image.
+ * @param channelId - optional OpenAI-compatible channel id.
  */
 async function runStudioBatch(
   input: StudioGenerateRequest,
@@ -341,6 +362,7 @@ async function runStudioBatch(
   startedAt: number,
   concurrency: number,
   generateSingle: (index: number) => Promise<StudioGeneratedItem>,
+  channelId?: string,
 ): Promise<StudioGenerateResponse> {
   const count = input.count ?? 1
 
@@ -350,6 +372,7 @@ async function runStudioBatch(
       attachment: single.attachment,
       output: single.output,
       provider,
+      ...(channelId === undefined ? {} : { channel: channelId }),
       model: input.model,
       prompt: input.prompt,
       createdAt: Date.now(),
@@ -388,6 +411,7 @@ async function runStudioBatch(
     attachment: first.attachment,
     output: first.output,
     provider,
+    ...(channelId === undefined ? {} : { channel: channelId }),
     model: input.model,
     prompt: input.prompt,
     createdAt: Date.now(),
@@ -592,9 +616,17 @@ function subscriptionResponse(
   }
 }
 
-export function studioProfile(config: Config, provider: CloudImageProvider, configured: boolean): StudioProviderProfile {
-  const result = cloudStudioProfile(config, provider, configured)
-  return { ...result, ...watermarkProfile(config, provider, result.model) }
+export function studioProfile(config: Config, provider: CloudImageProvider, configured: boolean, channelId?: string): StudioProviderProfile {
+  const channel = provider === 'openai-compat' && channelId !== undefined ? resolveOpenAICompatChannel(config, channelId) : undefined
+  const scoped = channel === undefined ? config : withOpenAICompatChannel(config, channel.id)
+  const result = cloudStudioProfile(scoped, provider, configured)
+  const editModel = provider === 'openai-compat' ? scoped.openaiCompatEditModel?.trim() : undefined
+  return {
+    ...result,
+    ...(channel === undefined ? {} : { channel: channel.id, label: channel.label }),
+    ...(editModel ? { editModel } : {}),
+    ...watermarkProfile(scoped, provider, result.model),
+  }
 }
 
 function cloudStudioProfile(config: Config, provider: CloudImageProvider, configured: boolean): StudioProviderProfile {
@@ -633,7 +665,9 @@ function cloudStudioProfile(config: Config, provider: CloudImageProvider, config
 /** Output capabilities remain visible before credentials, address or model are configured. */
 function compatibleStudioProfile(config: Config, model: string, configured: boolean): StudioProviderProfile {
   const groups = openAICompatTable(config)
-  const qualityProfile = {
+  const modelOptions = resolveOpenAICompatModels({ ...config, openaiCompatModel: model }).map(value => ({ value, label: value }))
+  const capabilityProfile = {
+    modelOptions,
     generationQualityOptions: compatQualityOptions(config),
     defaultGenerationQuality: compatRequestQuality(config) ?? PROVIDER_DEFAULT_QUALITY,
     resolutionOptions: Object.fromEntries(groups.map(group => [group.ratio, group.tiers.map(entry => ({ value: entry.tier, label: `${entry.tier} · ${entry.size}` }))])),
@@ -642,11 +676,11 @@ function compatibleStudioProfile(config: Config, model: string, configured: bool
   if (config.openaiCompatSizes === undefined || Object.keys(config.openaiCompatSizes).length === 0) {
     return {
       ...profile('openai-compat', model, configured, ['1:1', '3:2', '2:3'].map(option), [{ value: 'standard', label: '标准（推荐）' }], '1:1', 'standard'),
-      ...qualityProfile,
+      ...capabilityProfile,
       resolutionOptions: Object.fromEntries(groups.map(group => [group.ratio, [{ value: 'standard', label: `标准 · ${group.tiers[0]!.size}` }]])),
     }
   }
-  return { ...openAICompatStudioProfile(config, model, configured), ...qualityProfile }
+  return { ...openAICompatStudioProfile(config, model, configured), ...capabilityProfile }
 }
 
 function profile(
@@ -687,7 +721,7 @@ function option(value: string): StudioOption {
 }
 
 function assertAllowed(profile: StudioProviderProfile, input: StudioGenerateRequest): void {
-  if (input.model !== profile.model) throw new Error('模型配置已变化，请刷新工作台后重试')
+  if (!studioModelOptionsForMode(profile, input.mode).some(option => option.value === input.model)) throw new Error('模型配置已变化，请刷新工作台后重试')
   if (!profile.ratioOptions.some(option => option.value === input.ratio)) throw new Error('该 Provider 不支持所选比例')
   const selectedQuality = input.provider === 'openai' ? input.generationQuality ?? input.quality : input.resolution ?? input.quality
   if (!profile.qualityOptions.some(option => option.value === selectedQuality)) throw new Error('该 Provider 不支持所选清晰度')

@@ -1,6 +1,7 @@
 import { type StudioGenerateRequest, type StudioWatermark } from '../shared.js';
 export interface RegeneratableImage {
     provider: string;
+    channel?: string | undefined;
     model: string;
     output?: string | undefined;
 }

@@ -32,6 +32,10 @@ describe('probe targets', () => {
     expect(target.url).toBe('https://generativelanguage.googleapis.com/v1beta/models')
   })
 
+  it.each(['https://relay.example/proxy/v1beta', 'https://relay.example/proxy/v1beta/models/gemini:generateContent'])('pulls models from a native Google base at %s', googleEndpoint => {
+    expect(probeTarget('google', { googleEndpoint, googleNative: true }, 'gem-key').url).toBe('https://relay.example/proxy/v1beta/models')
+  })
+
   it('joins OpenAI relays and official endpoints on /models with Bearer auth', () => {
     expect(probeTarget('openai', {}, 'sk-openai')).toEqual({
       url: 'https://api.openai.com/v1/models',
@@ -124,14 +128,14 @@ describe('probe classification', () => {
 describe('test connection route', () => {
   let server: Server
   let serverUrl: string
-  let probeCalls: Array<{ provider: string; key: string | undefined }>
+  let probeCalls: Array<{ provider: string; key: string | undefined; channel?: string }>
 
-  const deps = (options: { key?: string }): TestRouteDeps => ({
-    resolveKey: async provider => {
-      probeCalls.push({ provider, key: options.key })
+  const deps = (options: { key?: string; config?: TestRouteDeps['config'] }): TestRouteDeps => ({
+    resolveKey: async (provider, channel) => {
+      probeCalls.push({ provider, key: options.key, ...(channel === undefined ? {} : { channel }) })
       return options.key
     },
-    config: () => ({}),
+    config: options.config ?? (() => ({})),
   })
 
   /** Stub provider probes while the test's own requests to the local server keep working. */
@@ -149,7 +153,7 @@ describe('test connection route', () => {
     probeCalls = []
   })
 
-  async function startServer(options: { key?: string }): Promise<void> {
+  async function startServer(options: { key?: string; config?: TestRouteDeps['config'] }): Promise<void> {
     server = createServer((req, res) => {
       void serveTestConnection(req, res, deps(options)).catch(() => { res.statusCode = 500; res.end() })
     })
@@ -178,6 +182,26 @@ describe('test connection route', () => {
     expect(probeCalls).toEqual([{ provider: 'openai', key: 'sk-live' }])
     const probedUrl = fetchMock.mock.calls.map(([input]) => String(input)).find(url => url !== serverUrl)
     expect(probedUrl).toBe('https://api.openai.com/v1/models')
+  })
+
+  it('probes a named compat channel against its own relay and credential slot', async () => {
+    const fetchMock = stubProbeFetch(async () => new Response('ok', { status: 200 }))
+    await startServer({
+      key: 'sk-relay-b',
+      config: () => ({
+        openaiCompatBaseURL: 'https://legacy.example/v1', openaiCompatModel: 'legacy-model',
+        openaiCompatChannels: [{ id: 'relay-b', label: 'Relay B', keyRef: '', baseURL: 'https://relay-b.example/v1', model: 'relay-b-model' }],
+      }),
+    })
+    const response = await fetch(serverUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'openai-compat', channel: 'relay-b' }),
+    })
+    await expect(response.json()).resolves.toEqual({ ok: true })
+    expect(probeCalls).toEqual([{ provider: 'openai-compat', key: 'sk-relay-b', channel: 'relay-b' }])
+    const probedUrl = fetchMock.mock.calls.map(([input]) => String(input)).find(url => url !== serverUrl)
+    expect(probedUrl).toBe('https://relay-b.example/v1/models')
   })
 
   it('reports a missing key without probing the network', async () => {
@@ -294,6 +318,30 @@ describe('google model pull', () => {
     expect(calledUrl).toContain('generativelanguage.googleapis.com/v1beta/models')
     const headers = fetchMock.mock.calls[0][1]?.headers as Record<string, string>
     expect(headers['x-goog-api-key']).toBe('gem-key')
+  })
+
+  it('does not forward the Google API key to a redirect target', async () => {
+    let redirectedRequests = 0
+    const target = createServer((req, res) => {
+      redirectedRequests += 1
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"models":[{"name":"models/gemini-3.1-flash-image"}]}')
+    })
+    await new Promise<void>(resolve => target.listen(0, '127.0.0.1', resolve))
+    const targetUrl = `http://127.0.0.1:${(target.address() as AddressInfo).port}/models`
+    const source = createServer((req, res) => {
+      res.writeHead(302, { location: targetUrl })
+      res.end()
+    })
+    await new Promise<void>(resolve => source.listen(0, '127.0.0.1', resolve))
+    const sourceUrl = `http://127.0.0.1:${(source.address() as AddressInfo).port}/v1beta`
+    try {
+      await expect(fetchGoogleImageModels({ googleNative: true, googleEndpoint: sourceUrl }, 'gem-secret')).rejects.toThrow()
+      expect(redirectedRequests).toBe(0)
+    } finally {
+      await new Promise<void>(resolve => source.close(() => resolve()))
+      await new Promise<void>(resolve => target.close(() => resolve()))
+    }
   })
 
   it('classifies missing keys and auth failures like the probe does', async () => {

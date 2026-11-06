@@ -21,6 +21,10 @@ export interface CanvasSessions {
     list: {
         getSnapshot(): {
             current?: string | undefined;
+            byId?: Readonly<Record<string, {
+                id: string;
+                retainedBy?: Readonly<Record<string, number>>;
+            }>>;
         };
         subscribe(listener: () => void): () => void;
     };
@@ -28,6 +32,17 @@ export interface CanvasSessions {
         eventSource: EventSource;
     } | undefined;
 }
+/** Runtime face of uiSession.adapter.current; absent on older hosts. */
+export interface CanvasSessionSelection {
+    getSnapshot(): {
+        readonly key?: string | undefined;
+    } | undefined;
+    subscribe(listener: () => void): () => void;
+}
+/** Keep one landing subscription while the optional UI service loads or unloads. */
+export declare function createCanvasSessionSelection(): CanvasSessionSelection & {
+    bind(source: CanvasSessionSelection): () => void;
+};
 /** Subscribe to live additions, never to card rendering or history replay. */
-export declare function startConversationLandings(sessions: CanvasSessions): () => void;
+export declare function startConversationLandings(sessions: CanvasSessions, selection?: CanvasSessionSelection): () => void;
 export {};

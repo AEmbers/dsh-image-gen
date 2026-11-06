@@ -1,4 +1,4 @@
-/** Google Gemini Interactions API adapter. */
+/** Google Gemini Interactions and opt-in generateContent adapters. */
 import type { ImageMediaType } from '@deepseek-ai/dsh-attachment';
 import type { AspectRatio, ImageSize } from './config.js';
 /** Image bytes returned before Attachment persistence. */
@@ -9,6 +9,7 @@ export interface GeneratedImage {
 interface GoogleRequestBase {
     apiKey: string;
     endpoint: string;
+    native?: boolean;
     model: string;
     aspectRatio: AspectRatio;
     imageSize: ImageSize;
@@ -27,4 +28,6 @@ export declare function editGoogleImage(input: GoogleRequestBase & {
         mediaType: ImageMediaType;
     }>;
 }): Promise<GeneratedImage>;
+/** The settings probe and model picker use the same base as image requests. */
+export declare function googleModelsEndpoint(endpoint: string, native: boolean): string;
 export {};

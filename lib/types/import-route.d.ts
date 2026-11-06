@@ -12,5 +12,16 @@ export interface ImportRouteDeps {
     maxImageBytes: number;
     /** Accepted media types from the host attachment limits. */
     mediaTypes: readonly string[];
+    /** Optional background warm-up for the gallery thumbnail of a saved image. */
+    warmThumbnail?(ref: ImageAttachmentRef): void;
+    /** Persist the pre-normalization bytes when the attachment layer changed them. */
+    saveOriginal?(input: {
+        data: Uint8Array;
+        mediaType: ImageMediaType;
+    }): Promise<{
+        key: string;
+        bytes: number;
+        mediaType: ImageMediaType;
+    } | undefined>;
 }
 export declare function serveImport(req: IncomingMessage, res: ServerResponse, deps: ImportRouteDeps): Promise<void>;

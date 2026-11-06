@@ -17,7 +17,7 @@ export declare function getAntigravityVersion(): string;
 /** Test seam: pin the version so unit tests never depend on the network. */
 export declare function setAntigravityVersionForTest(version: string | undefined): void;
 /** Fetch and cache the current version once; failures keep the fallback. */
-export declare function initAntigravityVersion(): Promise<void>;
+export declare function initAntigravityVersion(signal?: AbortSignal): Promise<void>;
 export interface AntigravityConfig {
     clientId: string;
     clientSecret: string;

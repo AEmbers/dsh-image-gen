@@ -1,6 +1,6 @@
 {
   "name": "dsh-image-gen",
-  "version": "0.9.5",
+  "version": "0.10.3",
   "description": "Bring ChatGPT-like image generation to DeepSeek Harness — Gemini, OpenAI, Seedream, DashScope, local ComfyUI & more.",
   "type": "module",
   "author": "shanliuling",
@@ -64,7 +64,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc && tsdown",
+    "build": "node scripts/clean-lib.mjs && tsc && tsdown",
     "test": "vitest run",
     "test:package": "node scripts/check-package.mjs",
     "pack:check": "pnpm pack --dry-run"

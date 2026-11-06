@@ -58,15 +58,33 @@ function formHarness(lang = 'zh', initialValue: Record<string, unknown> = { open
     return ImageGenerationSettingsCard(props)
   }
   const row = () => elements(render()).find(element => element.key === provider
-    && element.props.className?.startsWith('dsh-ig-provider-row '))!
+    && element.props.className?.startsWith('dsh-ig-provider-row'))!
   const find = (predicate: (element: Element) => boolean) => elements(row()).find(predicate)!
-  elements(render()).find(element => element.props.className === 'dsh-ig-head')!.props.onClick()
+  const channelRow = () => elements(render()).find(element => element.props.className?.includes('dsh-ig-compat-channel-row'))
+  const findChannel = (predicate: (element: Element) => boolean) => elements(channelRow()).find(predicate)
+  // The card renders open on the plugin's own page now, so only the provider
+  // row still needs a click to expand.
   find(element => element.props.className === 'dsh-ig-provider-head').props.onClick()
   return {
     setKey, setSetting,
+    expand: () => find(element => element.props.className === 'dsh-ig-provider-head').props.onClick(),
     cardText: () => text(render()),
+    settingInput: (label: string) => {
+      const field = elements(render()).find(element => element.type === 'label' && text(element).startsWith(label))!
+      return elements(field).find(element => element.type === 'input')!
+    },
     syncScope: () => { for (const setup of hooks.scopeEffects.splice(0)) setup() },
     rowText: () => text(row()),
+    providerHeadChildren: () => elements(row()).find(element => element.props.className === 'dsh-ig-provider-head-row')!.props.children as Element[],
+    addChannel: () => elements(render()).find(element => element.props['aria-label'] === (lang === 'zh' ? '新增 OpenAI 兼容渠道' : 'Add OpenAI-compatible channel'))!.props.onClick(),
+    channelExists: () => channelRow() !== undefined,
+    channelText: () => text(channelRow()),
+    channelField: (label: string, value: string) => {
+      const field = findChannel(element => element.type === 'label' && text(element).startsWith(label))!
+      elements(field).find(element => ['input', 'textarea', 'select'].includes(String(element.type)))!.props.onChange({ target: { value } })
+    },
+    saveChannel: () => findChannel(element => element.type === 'form')!.props.onSubmit({ preventDefault() {} }),
+    removeChannel: () => findChannel(element => element.type === 'button' && text(element) === (lang === 'zh' ? '删除渠道' : 'Remove channel'))!.props.onClick(),
     typeURL: (value: string) => find(element => element.props.type === 'url').props.onChange({ target: { value } }),
     typeKey: (value: string) => find(element => element.props.type === 'password').props.onChange({ target: { value } }),
     keyValue: () => find(element => element.props.type === 'password').props.value,
@@ -84,6 +102,90 @@ beforeEach(() => { hooks.values = []; hooks.cursor = 0; hooks.scopeEffects = [] 
 afterEach(() => { vi.unstubAllGlobals() })
 
 describe('settings card credential actions', () => {
+  it.each(['zh', 'en'])('saves and reopens the global cloud timeout in %s', async lang => {
+    const form = formHarness(lang)
+    const label = lang === 'zh' ? '云端生成超时（秒）' : 'Cloud generation timeout (seconds)'
+    expect(form.settingInput(label).props.value).toBe(150)
+    expect(form.settingInput(label).props).toMatchObject({ min: '5', max: '3600', step: '1' })
+    form.settingInput(label).props.onChange({ target: { value: '240' } })
+    form.settingInput(label).props.onBlur()
+    await vi.waitFor(() => expect(form.setSetting).toHaveBeenCalledWith('cloudTimeoutMs', 240_000))
+    hooks.values = []
+    expect(form.settingInput(label).props.value).toBe(240)
+    expect(form.cardText()).toContain(lang === 'zh' ? '不影响订阅通道和 ComfyUI' : 'Does not affect subscription channels or ComfyUI')
+  })
+
+  it('restores the saved cloud timeout when the host rejects the write', async () => {
+    const form = formHarness('zh', { cloudTimeoutMs: 240_000 })
+    const label = '云端生成超时（秒）'
+    form.setSetting.mockRejectedValueOnce(new Error('timeout-write-rejected'))
+    form.settingInput(label).props.onChange({ target: { value: '300' } })
+    form.settingInput(label).props.onBlur()
+    await vi.waitFor(() => expect(form.cardText()).toContain('timeout-write-rejected'))
+    expect(form.settingInput(label).props.value).toBe(240)
+  })
+
+  it.each(['', '4', '3601', '5.5'].flatMap(value =>
+    [undefined, 240_000].map(cloudTimeoutMs => ({ value, cloudTimeoutMs })),
+  ))('restores the saved cloud timeout on blur for invalid input "$value" ($cloudTimeoutMs)', ({ value, cloudTimeoutMs }) => {
+    const form = formHarness('zh', { cloudTimeoutMs })
+    const label = '云端生成超时（秒）'
+    form.settingInput(label).props.onChange({ target: { value } })
+    form.settingInput(label).props.onBlur()
+    expect(form.settingInput(label).props.value).toBe((cloudTimeoutMs ?? 150_000) / 1000)
+    expect(form.setSetting).not.toHaveBeenCalled()
+  })
+
+  it.each(['zh', 'en'])('saves, reopens and clears the separate edit model with the SiliconFlow format in %s', async lang => {
+    const form = formHarness(lang, { openaiCompatBaseURL: 'https://relay.example/v1', openaiCompatModel: 'generation-model' })
+    const modelLabel = lang === 'zh' ? '图生图模型' : 'Editing model'
+    const formatLabel = lang === 'zh' ? '图生图请求形态' : 'Edit request format'
+    form.field(modelLabel, ' Qwen/Qwen-Image-Edit ')
+    form.field(formatLabel, 'siliconflowJson')
+    form.save()
+    await vi.waitFor(() => expect(form.setSetting).toHaveBeenCalledWith('openaiCompatEditFormat', 'siliconflowJson'))
+    expect(form.setSetting).toHaveBeenCalledWith('openaiCompatEditModel', 'Qwen/Qwen-Image-Edit')
+    expect(form.setSetting).toHaveBeenCalledWith('openaiCompatModel', 'generation-model')
+    hooks.values = []
+    form.expand()
+    expect(form.rowText()).toContain(lang === 'zh' ? '编辑尺寸由参考图决定' : 'Edit dimensions follow the reference')
+    form.field(modelLabel, '')
+    form.save()
+    await vi.waitFor(() => expect(form.setSetting).toHaveBeenCalledWith('openaiCompatEditModel', ''))
+  })
+
+  it('automatically recognizes the official SiliconFlow endpoint while keeping reference instructions visible', () => {
+    const form = formHarness('zh', { openaiCompatBaseURL: 'https://api.siliconflow.cn/v1', openaiCompatModel: 'Qwen/Qwen-Image', openaiCompatEditModel: 'Qwen/Qwen-Image-Edit-2509' })
+    expect(form.rowText()).toContain('自动：官方接口 JSON 格式')
+    expect(form.rowText()).toContain('Edit-2509 最多三张')
+    expect(form.rowText()).toContain('附加 JSON 字段')
+  })
+
+  it.each(['拉取模型', '测试连接'])('requires saving a changed Google protocol before %s', action => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const form = formHarness('zh', {}, 'google')
+    form.field('请求协议', 'native')
+    form.click(action)
+    expect(form.rowText()).toContain('请求协议尚未保存')
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each(['zh', 'en'])('saves and reopens the Google native protocol setting in %s', async lang => {
+    const form = formHarness(lang, {}, 'google')
+    form.field(lang === 'zh' ? '请求协议' : 'Request protocol', 'native')
+    form.typeURL('https://relay.example/v1beta')
+    form.save()
+    await vi.waitFor(() => expect(form.setSetting).toHaveBeenCalledWith('googleNative', true))
+    expect(form.setSetting).toHaveBeenCalledWith('googleEndpoint', 'https://relay.example/v1beta')
+    hooks.values = []
+    form.expand()
+    expect(form.rowText()).toContain('https://example.com/v1beta')
+    form.field(lang === 'zh' ? '请求协议' : 'Request protocol', 'interactions')
+    form.save()
+    await vi.waitFor(() => expect(form.setSetting).toHaveBeenCalledWith('googleNative', false))
+  })
+
   it.each([
     { openaiCompatBaseURL: 'https://token.sensenova.cn/v1', openaiCompatModel: 'sensenova-u1.5-lite' },
     { openaiCompatBaseURL: 'https://workspace-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1', openaiCompatModel: 'qwen-image-3.0' },
@@ -203,6 +305,50 @@ describe('settings card credential actions', () => {
     expect(form.rowText()).toContain('Key 未配置')
     expect(form.keyValue()).toBe('sk-draft')
     expect(form.setKey).not.toHaveBeenCalled()
+  })
+})
+
+describe('settings card compat channels', () => {
+  it('places the add button after the default channel disclosure', () => {
+    const form = formHarness()
+    const children = form.providerHeadChildren()
+    expect(children[0]!.props.className).toBe('dsh-ig-provider-head')
+    expect(children[1]!.props['aria-label']).toBe('新增 OpenAI 兼容渠道')
+  })
+
+  it('removes an unsaved draft immediately without writing settings', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) })
+    const form = formHarness()
+    form.addChannel()
+    expect(form.channelExists()).toBe(true)
+    form.removeChannel()
+    await vi.waitFor(() => expect(form.channelExists()).toBe(false))
+    expect(form.setSetting).not.toHaveBeenCalled()
+  })
+
+  it('saves a newly added channel with its own endpoint and model', async () => {
+    const form = formHarness()
+    form.addChannel()
+    form.channelField('接口地址', 'https://relay-b.example/v1')
+    form.channelField('默认模型', 'relay-b-model')
+    form.saveChannel()
+    await vi.waitFor(() => expect(form.setSetting).toHaveBeenCalledWith('openaiCompatChannels', [
+      expect.objectContaining({ label: 'OpenAI 兼容 2', baseURL: 'https://relay-b.example/v1', model: 'relay-b-model', models: ['relay-b-model'] }),
+    ]))
+    expect(form.channelExists()).toBe(true)
+  })
+
+  it('removes a persisted channel after the accepted write and resets its active selection', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) })
+    const form = formHarness('zh', {
+      openaiCompatActiveChannel: 'relay-b',
+      openaiCompatChannels: [{ id: 'relay-b', label: 'Relay B', keyRef: 'DSH_IMAGE_GEN_OPENAI_COMPAT_KEY_RELAY_B', baseURL: 'https://relay-b.example/v1', model: 'relay-b-model' }],
+    })
+    expect(form.channelExists()).toBe(true)
+    form.removeChannel()
+    await vi.waitFor(() => expect(form.channelExists()).toBe(false))
+    expect(form.setSetting).toHaveBeenCalledWith('openaiCompatChannels', [])
+    expect(form.setSetting).toHaveBeenCalledWith('openaiCompatActiveChannel', 'default')
   })
 })
 

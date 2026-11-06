@@ -1,5 +1,6 @@
 /** OpenAI Images API and compatible response adapter. */
 import type { ImageMediaType } from '@deepseek-ai/dsh-attachment'
+import { guardedFetch, readResponseBody } from './fetch-diagnostics.js'
 import { redactSecrets } from './redact.js'
 import { detectImageMediaType } from './reference-image.js'
 import { arkOutputBody, type ArkOutputOptions } from './shared.js'
@@ -38,7 +39,7 @@ export async function generateOpenAICompatibleImage(input: {
   /** Ark-only output controls; ignored by every other provider. */
   arkOptions?: ArkOutputOptions
 }): Promise<GeneratedCompatibleImage> {
-  const response = await fetch(imageEndpoint(input.baseURL, 'generations'), {
+  const response = await guardedFetch(`${input.provider} image request`, input.signal, () => fetch(imageEndpoint(input.baseURL, 'generations'), {
     method: 'POST', redirect: 'error', signal: input.signal,
     headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -52,12 +53,12 @@ export async function generateOpenAICompatibleImage(input: {
       ...(input.provider === 'seedream' ? { response_format: 'url', ...arkOutputBody(input.arkOptions, { background: false }) } : {}),
       ...(input.extraBody ?? {}),
     }),
-  })
+  }), input.apiKey)
   return parseImageResponse(response, input.provider, input)
 }
 
 /** How the edits endpoint expects its request body (#41). */
-export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'xaiJson' | 'qwenJson'
+export type CompatEditFormat = 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'siliconflowJson' | 'xaiJson' | 'qwenJson'
 
 export async function editOpenAICompatibleImage(input: {
   apiKey: string
@@ -85,15 +86,45 @@ export async function editOpenAICompatibleImage(input: {
   /** Vendor quality tier sent with the edit request when set. */
   quality?: string
   /**
+   * Multipart edit response shape. `auto` asks for inline b64_json first and
+   * retries once without the field when a relay rejects it (400/422); `url`
+   * keeps the relay default; `b64_json` never retries.
+   */
+  editResponseFormat?: 'auto' | 'b64_json' | 'url'
+  /** Called once when the relay rejects response_format and the request is retried without it. */
+  onResponseFormatRetry?: (status: number) => void
+  /**
    * Extra fields for the edit request (multipart: one form field per entry;
    * JSON shapes: merged after `editExtra`), e.g. xAI's
    * aspect_ratio/resolution pair.
    */
   extraBody?: Readonly<Record<string, unknown>>
 }): Promise<GeneratedCompatibleImage> {
+  if (input.editFormat === 'siliconflowJson') {
+    const body: Record<string, unknown> = { model: input.model, prompt: input.prompt, ...(input.editExtra ?? {}), ...(input.extraBody ?? {}) }
+    const model = typeof body.model === 'string' ? body.model.trim() : ''
+    if (!model) throw new Error('硅基流动图生图需要编辑模型')
+    body.model = model
+    if (model === 'Qwen/Qwen-Image') throw new Error('Qwen/Qwen-Image 是文生图模型；请配置图生图模型，例如 Qwen/Qwen-Image-Edit')
+    const maxReferences = model === 'Qwen/Qwen-Image-Edit-2509' ? 3 : 1
+    if (input.sourceImages.length < 1 || input.sourceImages.length > maxReferences) throw new Error(`${model} 图生图支持 1–${String(maxReferences)} 张参考图，当前 ${String(input.sourceImages.length)} 张；请精简参考图或选择支持多图的编辑模型`)
+    // Qwen edits derive output dimensions from the reference. Generic picker
+    // defaults must not turn into unsupported image_size/size/quality fields.
+    if (['size', 'image_size', 'quality'].some(key => key in body)) throw new Error('此硅基流动图生图格式不发送 size、image_size 或 quality；请从图生图额外字段中移除这些字段')
+    delete body.image
+    delete body.image2
+    delete body.image3
+    for (const [index, source] of input.sourceImages.entries()) body[index === 0 ? 'image' : `image${String(index + 1)}`] = toDataUrl(source)
+    const response = await guardedFetch('siliconflow image edit request', input.signal, () => fetch(imageEndpoint(input.baseURL, 'generations'), {
+      method: 'POST', redirect: 'error', signal: input.signal,
+      headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }), input.apiKey)
+    return parseImageResponse(response, 'siliconflow', input)
+  }
   if (input.editFormat === 'qwenJson') {
     // Qwen's official compatible API edits through images/generations, using image URLs directly.
-    const response = await fetch(imageEndpoint(input.baseURL, 'generations'), {
+    const response = await guardedFetch('openai-compat image edit request', input.signal, () => fetch(imageEndpoint(input.baseURL, 'generations'), {
       method: 'POST', redirect: 'error', signal: input.signal,
       headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -105,12 +136,12 @@ export async function editOpenAICompatibleImage(input: {
         ...(input.editExtra ?? {}),
         ...(input.extraBody ?? {}),
       }),
-    })
+    }), input.apiKey)
     return parseImageResponse(response, 'openai-compat', input)
   }
   if (input.editFormat === 'xaiJson') {
     const references = input.sourceImages.map(image => ({ type: 'image_url', url: toDataUrl(image) }))
-    const response = await fetch(imageEndpoint(input.baseURL, 'edits'), {
+    const response = await guardedFetch('xai image edit request', input.signal, () => fetch(imageEndpoint(input.baseURL, 'edits'), {
       method: 'POST', redirect: 'error', signal: input.signal,
       headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -120,7 +151,7 @@ export async function editOpenAICompatibleImage(input: {
         ...(input.quality === undefined ? {} : { quality: input.quality }),
         ...(input.extraBody ?? {}),
       }),
-    })
+    }), input.apiKey)
     return parseImageResponse(response, 'xai', input)
   }
   if (input.editFormat === 'jsonImageUrlArray') {
@@ -137,11 +168,11 @@ export async function editOpenAICompatibleImage(input: {
       ...(input.editExtra ?? {}),
       ...(input.extraBody ?? {}),
     }
-    const response = await fetch(imageEndpoint(input.baseURL, 'edits'), {
+    const response = await guardedFetch('openai image edit request', input.signal, () => fetch(imageEndpoint(input.baseURL, 'edits'), {
       method: 'POST', redirect: 'error', signal: input.signal,
       headers: { authorization: `Bearer ${input.apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify(body),
-    })
+    }), input.apiKey)
     return parseImageResponse(response, 'openai', input)
   }
   if (input.editFormat === 'formReferenceImages') {
@@ -155,39 +186,81 @@ export async function editOpenAICompatibleImage(input: {
     for (const [key, value] of Object.entries(input.extraBody ?? {})) form.append(key, String(value))
     form.append('response_format', 'b64_json')
     form.append('reference_images', JSON.stringify(input.sourceImages.map(sourceImage => Buffer.from(sourceImage.data).toString('base64'))))
-    const response = await fetch(imageEndpoint(input.baseURL, 'edits'), {
+    const response = await guardedFetch('openai image edit request', input.signal, () => fetch(imageEndpoint(input.baseURL, 'edits'), {
       method: 'POST', redirect: 'error', signal: input.signal,
       headers: { authorization: `Bearer ${input.apiKey}` },
       body: form,
-    })
+    }), input.apiKey)
     return parseImageResponse(response, 'openai', input)
   }
-  const form = new FormData()
-  const imageField = input.sourceImages.length > 1 ? 'image[]' : 'image'
-  input.sourceImages.forEach((sourceImage, index) => {
-    const uploadBytes = new Uint8Array(sourceImage.data)
-    const blob = new Blob([uploadBytes], { type: sourceImage.mediaType })
-    const filename = `reference-${index + 1}.${extensionOf(sourceImage.mediaType)}`
-    form.append(imageField, blob, filename)
-  })
-  form.append('prompt', input.prompt)
-  form.append('model', input.model)
-  if (input.size !== undefined && input.size.length > 0) form.append('size', input.size)
-  if (input.quality !== undefined) form.append('quality', input.quality)
-  for (const [key, value] of Object.entries(input.extraBody ?? {})) form.append(key, String(value))
-
-  const response = await fetch(imageEndpoint(input.baseURL, 'edits'), {
+  const responseFormat = input.editResponseFormat ?? 'url'
+  // An explicit response_format in extraBody is the channel's own choice; do
+  // not append a second value or retry around it.
+  const explicitResponseFormat = Object.prototype.hasOwnProperty.call(input.extraBody ?? {}, 'response_format')
+  const buildEditForm = (includeResponseFormat: boolean): FormData => {
+    const form = new FormData()
+    const imageField = input.sourceImages.length > 1 ? 'image[]' : 'image'
+    input.sourceImages.forEach((sourceImage, index) => {
+      const uploadBytes = new Uint8Array(sourceImage.data)
+      const blob = new Blob([uploadBytes], { type: sourceImage.mediaType })
+      const filename = `reference-${index + 1}.${extensionOf(sourceImage.mediaType)}`
+      form.append(imageField, blob, filename)
+    })
+    form.append('prompt', input.prompt)
+    form.append('model', input.model)
+    if (input.size !== undefined && input.size.length > 0) form.append('size', input.size)
+    if (input.quality !== undefined) form.append('quality', input.quality)
+    if (includeResponseFormat && !explicitResponseFormat) form.append('response_format', 'b64_json')
+    for (const [key, value] of Object.entries(input.extraBody ?? {})) {
+      if (value === undefined) continue
+      form.append(key, String(value))
+    }
+    return form
+  }
+  const sendEdit = (form: FormData): Promise<Response> => guardedFetch('openai image edit request', input.signal, () => fetch(imageEndpoint(input.baseURL, 'edits'), {
     method: 'POST', redirect: 'error', signal: input.signal,
     headers: { authorization: `Bearer ${input.apiKey}` },
     body: form,
-  })
+  }), input.apiKey)
+
+  let response = await sendEdit(buildEditForm(responseFormat !== 'url'))
+  // Retry only an error about response_format. Invalid dimensions and other
+  // 400/422 errors need to reach the user without a duplicate edit request.
+  if (responseFormat === 'auto' && !explicitResponseFormat && (response.status === 400 || response.status === 422)) {
+    const text = await readBoundedText(response, ERROR_LIMIT)
+    if (!rejectsResponseFormat(text)) throw new Error(`openai image request failed (${response.status}): ${redactSecrets(text, input.apiKey).slice(0, ERROR_LIMIT)}`)
+    input.onResponseFormatRetry?.(response.status)
+    response = await sendEdit(buildEditForm(false))
+  }
   return parseImageResponse(response, 'openai', input)
+}
+
+function rejectsResponseFormat(text: string): boolean {
+  let message = text
+  try {
+    const body = JSON.parse(text) as { error?: unknown; message?: unknown; detail?: unknown } | string
+    if (typeof body === 'string') message = body
+    else if (body !== null && typeof body === 'object') {
+      const error = typeof body.error === 'object' && body.error !== null ? body.error as { param?: unknown; message?: unknown; code?: unknown } : undefined
+      if (typeof error?.param === 'string') return error.param === 'response_format'
+      if (Array.isArray(body.detail)) {
+        // FastAPI lists validation errors by parameter path. Do not retry if
+        // any other parameter is invalid as well.
+        return body.detail.length > 0 && body.detail.every((entry: unknown) => {
+          const loc = entry !== null && typeof entry === 'object' ? (entry as { loc?: unknown }).loc : undefined
+          return Array.isArray(loc) && loc.includes('response_format')
+        })
+      }
+      message = [typeof body.error === 'string' ? body.error : undefined, error?.message, error?.code, body.message, body.detail].filter(value => typeof value === 'string').join(' ')
+    }
+  } catch { /* Some relays return plain-text validation errors. */ }
+  return /(?:response[_ -]?format|b64_json)/i.test(message) && /(?:unsupported|not\s+(?:support|allowed|permitted|accepted|implemented)|unknown|unrecognized|unexpected|invalid|extra\s+(?:field|input)|不支持|不允许|未知|无效|未识别)/i.test(message)
 }
 
 async function parseImageResponse(
   response: Response,
   provider: string,
-  input: { maxBytes: number; signal: AbortSignal; apiKey?: string },
+  input: { baseURL: string; maxBytes: number; signal: AbortSignal; apiKey?: string },
 ): Promise<GeneratedCompatibleImage> {
   const text = await readBoundedText(response, Math.ceil(input.maxBytes * 1.4) + ERROR_LIMIT)
   if (!response.ok) throw new Error(`${provider} image request failed (${response.status}): ${redactSecrets(text, input.apiKey).slice(0, ERROR_LIMIT)}`)
@@ -234,7 +307,7 @@ function firstImage(value: unknown): { b64_json?: string; url?: string; mime_typ
 async function downloadImage(
   url: string | undefined,
   provider: string,
-  input: { maxBytes: number; signal: AbortSignal; apiKey?: string },
+  input: { baseURL: string; maxBytes: number; signal: AbortSignal; apiKey?: string },
 ): Promise<GeneratedCompatibleImage> {
   if (url === undefined) throw new Error(`${provider} image request returned no image data`)
   if (url.startsWith('data:')) {
@@ -243,24 +316,66 @@ async function downloadImage(
     const data = decodeBase64(parsed.base64, provider)
     return { data, mediaType: detectImageMediaType(data) ?? imageMediaType(parsed.mediaType) ?? 'image/png' }
   }
-  let response = await fetch(url, {
-    redirect: 'follow', signal: input.signal,
-    ...(input.apiKey === undefined ? {} : { headers: { authorization: `Bearer ${input.apiKey}` } }),
-  })
-  // Some relay CDNs (e.g. Agnes AI, SenseNova's OSS) reject image downloads
-  // that carry an Authorization header (WAF rules), even though the URL is
-  // public - and not always with 401/403 (SenseNova's OSS answers 400).
-  // Retrying without the header is safe (downgraded request, no secret sent)
-  // and only ever turns a guaranteed failure into a possible success: URLs
-  // that genuinely need auth would have failed anyway.
-  if (!response.ok && input.apiKey !== undefined) {
-    response = await fetch(url, { redirect: 'follow', signal: input.signal })
+  // Relative URLs are legal for self-hosted gateways (SGLang returns
+  // "/v1/images/<id>/content"): resolve them against the configured base URL,
+  // then fall back to the origin path for relays whose real route drops /v1.
+  const candidates = imageDownloadCandidates(url, input.baseURL, provider)
+  let response: Response | undefined
+  let failure: unknown
+  for (const candidate of candidates) {
+    try {
+      response = await requestImageCandidate(candidate, provider, input)
+      if (response.ok) break
+      failure = new Error(`${provider} image download failed (${response.status})`)
+      await response.body?.cancel().catch(() => undefined)
+      response = undefined
+    } catch (err) {
+      failure = err
+    }
   }
-  if (!response.ok) throw new Error(`${provider} image download failed (${response.status})`)
+  if (response === undefined) throw failure instanceof Error ? failure : new Error(`${provider} image download failed`)
   const data = await readBoundedBytes(response, input.maxBytes)
   const mediaType = detectImageMediaType(data) ?? imageMediaType(response.headers.get('content-type'))
   if (mediaType === undefined) throw new Error(`${provider} image download returned unsupported content type`)
   return { data, mediaType }
+}
+
+function imageDownloadCandidates(url: string, baseURL: string, provider: string): string[] {
+  const candidates: string[] = []
+  try {
+    candidates.push(new URL(url, baseURL.endsWith('/') ? baseURL : baseURL + '/').toString())
+  } catch {
+    // A malformed baseURL still leaves the origin fallback below for "/path".
+  }
+  if (url.startsWith('/')) {
+    try {
+      const stripped = new URL(baseURL).origin + url.replace(/^\/v1(?=\/)/, '')
+      if (!candidates.includes(stripped)) candidates.push(stripped)
+    } catch {
+      // No origin fallback without a parseable baseURL.
+    }
+  }
+  if (candidates.length === 0) throw new Error(provider + ' image download URL is not absolute')
+  return candidates
+}
+
+async function requestImageCandidate(
+  candidate: string,
+  provider: string,
+  input: { baseURL: string; maxBytes: number; signal: AbortSignal; apiKey?: string },
+): Promise<Response> {
+  const sameOrigin = new URL(candidate).origin === new URL(input.baseURL).origin
+  let response = await guardedFetch(provider + ' image download', input.signal, () => fetch(candidate, {
+    redirect: 'follow', signal: input.signal,
+    ...(input.apiKey === undefined || !sameOrigin ? {} : { headers: { authorization: 'Bearer ' + input.apiKey } }),
+  }), input.apiKey)
+  // Some same-origin relays reject Authorization on public image URLs, so the
+  // legacy retry remains available without ever sending the key to another origin.
+  if (!response.ok && input.apiKey !== undefined && sameOrigin) {
+    await response.body?.cancel().catch(() => undefined)
+    response = await guardedFetch(provider + ' image download', input.signal, () => fetch(candidate, { redirect: 'follow', signal: input.signal }), input.apiKey)
+  }
+  return response
 }
 
 function parseDataUrl(value: string): { mediaType: string; base64: string } | undefined {
@@ -296,7 +411,7 @@ async function readBoundedText(response: Response, maxBytes: number): Promise<st
 async function readBoundedBytes(response: Response, maxBytes: number): Promise<Uint8Array> {
   if (response.body === null) return new Uint8Array()
   const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0
-  try { for (;;) { const next = await reader.read(); if (next.done) break; bytes += next.value.byteLength; if (bytes > maxBytes) throw new Error(`Image response exceeded the ${String(maxBytes)} byte limit`); chunks.push(next.value) } } finally { reader.releaseLock() }
+  try { for (;;) { const next = await readResponseBody(response, () => reader.read()); if (next.done) break; bytes += next.value.byteLength; if (bytes > maxBytes) throw new Error(`Image response exceeded the ${String(maxBytes)} byte limit`); chunks.push(next.value) } } catch (error) { await reader.cancel().catch(() => undefined); throw error } finally { reader.releaseLock() }
   const joined = new Uint8Array(bytes); let offset = 0
   for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength }
   return joined

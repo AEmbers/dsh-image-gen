@@ -1,6 +1,6 @@
 /** Same-origin connection probe the settings card runs per provider. */
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Config, ImageProvider } from './config.js';
+import { type Config, type ImageProvider } from './config.js';
 import type { SubscriptionManager } from './subscription.js';
 import { type CloudImageProvider } from './shared.js';
 export { TEST_CONNECTION_ROUTE } from './shared.js';
@@ -71,8 +71,8 @@ export declare function probeComfyUIConnection(config: Config, signal?: AbortSig
 export declare function probeSubscriptionConnection(provider: 'chatgpt-sub' | 'grok-sub' | 'google-sub', manager: SubscriptionManager): Promise<ProbeResult>;
 /** Dependencies the test route needs from the plugin entry. */
 export interface TestRouteDeps {
-    /** The credential each cloud provider probes with, when one is stored. */
-    resolveKey(provider: CloudImageProvider): Promise<string | undefined>;
+    /** The credential each cloud provider or named relay channel probes with, when one is stored. */
+    resolveKey(provider: CloudImageProvider, channel?: string): Promise<string | undefined>;
     /** The currently authoritative config, including unsaved defaults. */
     config(): Config;
     /** The internal subscription account manager for the login-state probes. */

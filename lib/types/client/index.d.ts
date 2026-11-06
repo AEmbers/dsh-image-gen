@@ -9,26 +9,33 @@ export interface SettingsScope<T> {
     set(field: string, value: unknown): Promise<boolean | void>;
 }
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
-import { type ComfyUIWorkflowEntry, type ImageProvider } from '../shared.js';
+import { type ComfyUIWorkflowEntry, type OpenAICompatChannel, type ImageProvider } from '../shared.js';
 import { type LocaleService } from './gallery-view.js';
-import { type ImageResultPresentation } from './image-result-node.js';
+export { GeneratedImageCard, GeneratedImagesCard, PromotedImageResultNode } from './image-result-view.js';
 type Provider = ImageProvider;
 interface ImageSettings {
     provider?: Provider;
+    cloudTimeoutMs?: number;
     googleModel?: string;
     googleEndpoint?: string;
+    googleNative?: boolean;
     openaiBaseURL?: string;
     openaiModel?: string;
     openaiSizes?: Record<string, Record<string, string>>;
+    openaiCompatLabel?: string;
     openaiCompatBaseURL?: string;
     openaiCompatModel?: string;
+    openaiCompatModels?: string[];
+    openaiCompatChannels?: OpenAICompatChannel[];
+    openaiCompatActiveChannel?: string;
+    openaiCompatEditModel?: string;
     openaiCompatSizes?: Record<string, Record<string, string>>;
     openaiCompatQuality?: string;
     openaiCompatQualityOptions?: string[];
     openaiCompatExtraBody?: Record<string, unknown>;
     openaiCompatEditSizeMode?: 'auto' | 'selected';
     /** Edit-request shape for the openai-compat relay (#41); see src/config.ts. */
-    openaiCompatEditFormat?: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages';
+    openaiCompatEditFormat?: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'siliconflowJson';
     /** Extra JSON fields merged into the JSON edit body; ignored in multipart mode. */
     openaiCompatEditExtra?: Record<string, unknown>;
     seedreamBaseURL?: string;
@@ -89,20 +96,7 @@ interface SettingsFace {
     locale?: LocaleService | undefined;
     credentialEvents?: CredentialEvents | undefined;
 }
-interface ImageCardFace {
-    locale?: LocaleService | undefined;
-    promoted: boolean;
-}
 type SettingsCardProps = PropsRuntime<'settings.plugins.tab'> & InjectFace<SettingsFace>;
-type ImageCardProps = PropsRuntime<'tool.call.toolview'> & InjectFace<ImageCardFace>;
-interface ImageResultNodeProps {
-    node: {
-        data: {
-            results: readonly ImageResultPresentation[];
-        };
-    };
-    locale?: LocaleService | undefined;
-}
 /**
  * Required browser services. The settings form reader is deliberately absent:
  * DSH 0.1.7 serves it as `configForms` (keyed by the Loader entry id) while
@@ -115,9 +109,3 @@ export declare const inject: string[];
 export declare function apply(ctx: Context): void;
 /** Edit each provider independently, pick an explicit default, and verify keys inline. */
 export declare function ImageGenerationSettingsCard(props: SettingsCardProps): import("react").JSX.Element;
-/** Keep the legacy Tool row for old DSH and hand modern results to the independent Chat node. */
-export declare function GeneratedImageCard(props: ImageCardProps): import("react").JSX.Element;
-/** Suppress the folded duplicate on modern hosts; render every image on legacy hosts. */
-export declare function GeneratedImagesCard(props: ImageCardProps): import("react").JSX.Element;
-/** Render modern image artifacts as final conversation output instead of Tool process content. */
-export declare function PromotedImageResultNode(props: ImageResultNodeProps): import("react").JSX.Element;

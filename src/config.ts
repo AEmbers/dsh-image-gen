@@ -6,6 +6,7 @@ import type { CompatEditFormat } from './openai-compatible.js'
 import {
   ARK_BACKGROUND_MODES,
   ARK_OUTPUT_FORMATS,
+  DEFAULT_CLOUD_TIMEOUT_MS,
   DEFAULT_DASHSCOPE_ENDPOINT,
   DEFAULT_DASHSCOPE_MODEL,
   DEFAULT_COMFYUI_BASE_URL,
@@ -32,6 +33,8 @@ import {
   ZHIPU_API_KEY_ENV,
   activeComfyUIWorkflow,
   resolveComfyUIWorkflows,
+  resolveOpenAICompatChannel,
+  type OpenAICompatChannel,
   type ArkBackgroundMode,
   type ArkOutputFormat,
   type ArkOutputOptions,
@@ -42,6 +45,7 @@ import {
 export {
   ARK_BACKGROUND_MODES,
   ARK_OUTPUT_FORMATS,
+  DEFAULT_CLOUD_TIMEOUT_MS,
   DEFAULT_DASHSCOPE_ENDPOINT,
   DEFAULT_DASHSCOPE_MODEL,
   DEFAULT_COMFYUI_BASE_URL,
@@ -86,15 +90,26 @@ export type ImageSize = typeof IMAGE_SIZES[number]
 /** Bundle configuration from the profile patch and the Web settings page. */
 export interface Config {
   provider?: ImageProvider
+  cloudTimeoutMs?: number
   googleModel?: string
   googleEndpoint?: string
+  /** Use Gemini generateContent instead of Interactions; opt-in for native-only gateways. */
+  googleNative?: boolean
   openaiBaseURL?: string
   openaiModel?: string
   /** Official model size table: ratio -> resolution tier -> pixels. Empty uses model presets. */
   openaiSizes?: Record<string, Record<string, string>>
   /** OpenAI-compatible relay settings; independent from the official OpenAI row. */
+  openaiCompatLabel?: string
   openaiCompatBaseURL?: string
   openaiCompatModel?: string
+  /** Models offered by the workbench for the legacy default channel. */
+  openaiCompatModels?: string[]
+  /** Additional named relay channels; the flat fields above remain the default channel. */
+  openaiCompatChannels?: OpenAICompatChannel[]
+  openaiCompatActiveChannel?: string
+  /** Editing model; empty reuses the generation model. */
+  openaiCompatEditModel?: string
   /** Default quality; empty preserves the upstream default by omitting the field. */
   openaiCompatQuality?: string
   /** Quality values accepted by this relay; independent of resolution tiers. */
@@ -111,7 +126,7 @@ export interface Config {
     * `reference_images` field is a JSON array of base64 strings. Defaults to
     * `multipart`.
     */
-  openaiCompatEditFormat?: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages'
+  openaiCompatEditFormat?: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'siliconflowJson'
   /**
    * Extra JSON fields merged into the JSON edit body last (can override the
    * built-in defaults), e.g. SenseNova's `watermark`/`prompt_extend`.
@@ -174,6 +189,18 @@ export interface Config {
    * empty keeps them direct. Everything else in the host stays untouched.
    */
   subscriptionProxyUrl?: string
+  /** Prune the host request-image cache once at startup and then daily. */
+  requestCachePrune?: boolean
+  /** Retain request-image variants for this many days. */
+  requestCacheTtlDays?: number
+  /** Byte budget for the request-image cache; 0 disables the cap. */
+  requestCacheMaxBytes?: number
+  /** Override the request-image cache root (empty keeps the DSH_HOME default). */
+  requestCacheDir?: string
+  /** Keep the pre-normalization bytes when the attachment layer changes an import. */
+  vaultEnabled?: boolean
+  /** Override the raw-image vault root (empty keeps the DSH_HOME default). */
+  vaultDir?: string
 }
 
 /**
@@ -195,18 +222,40 @@ function volatile<T extends z>(schema: T): T {
  */
 export const Config = z.object({
   provider: volatile(z.union(IMAGE_PROVIDERS).default('google')),
+  cloudTimeoutMs: volatile(z.number().min(5_000).max(3_600_000).default(DEFAULT_CLOUD_TIMEOUT_MS)),
   googleModel: volatile(z.string().default(DEFAULT_GOOGLE_MODEL)),
   googleEndpoint: volatile(z.string().default(DEFAULT_GOOGLE_ENDPOINT)),
+  googleNative: volatile(z.boolean().default(false)),
   openaiBaseURL: volatile(z.string().default(DEFAULT_OPENAI_BASE_URL)),
   openaiModel: volatile(z.string().default(DEFAULT_OPENAI_MODEL)),
   openaiSizes: volatile(z.dict(z.dict(z.string())).default({})),
+  openaiCompatLabel: volatile(z.string().default('')),
   openaiCompatBaseURL: volatile(z.string().default('')),
   openaiCompatModel: volatile(z.string().default('')),
+  openaiCompatModels: volatile(z.array(z.string()).default([])),
+  openaiCompatChannels: volatile(z.array(z.object({
+    id: z.string(),
+    label: z.string().default(''),
+    keyRef: z.string(),
+    baseURL: z.string().default(''),
+    model: z.string().default(''),
+    models: z.array(z.string()).default([]),
+    editModel: z.string().default(''),
+    quality: z.string().default(''),
+    qualityOptions: z.array(z.string()).default([]),
+    extraBody: z.dict(z.any()).default({}),
+    editSizeMode: z.union(['auto', 'selected']).default('auto'),
+    editFormat: z.union([z.const('multipart'), z.const('jsonImageUrlArray'), z.const('formReferenceImages'), z.const('siliconflowJson')]).default('multipart'),
+    editExtra: z.dict(z.any()).default({}),
+    sizes: z.dict(z.dict(z.string())).default({}),
+  })).default([])),
+  openaiCompatActiveChannel: volatile(z.string().default('')),
+  openaiCompatEditModel: volatile(z.string().default('')),
   openaiCompatQuality: volatile(z.string().default('')),
   openaiCompatQualityOptions: volatile(z.array(z.string()).default(['auto', 'low', 'medium', 'high'])),
   openaiCompatExtraBody: volatile(z.dict(z.any()).default({})),
   openaiCompatEditSizeMode: volatile(z.union(['auto', 'selected']).default('auto')),
-  openaiCompatEditFormat: volatile(z.union([z.const('multipart'), z.const('jsonImageUrlArray'), z.const('formReferenceImages')]).default('multipart')),
+  openaiCompatEditFormat: volatile(z.union([z.const('multipart'), z.const('jsonImageUrlArray'), z.const('formReferenceImages'), z.const('siliconflowJson')]).default('multipart')),
   openaiCompatEditExtra: volatile(z.dict(z.any()).default({})),
   openaiCompatSizes: volatile(z.dict(z.dict(z.string())).default({})),
   seedreamBaseURL: volatile(z.string().default(DEFAULT_SEEDREAM_BASE_URL)),
@@ -230,11 +279,17 @@ export const Config = z.object({
   workspaceFolder: volatile(z.string().default(DEFAULT_WORKSPACE_FOLDER)),
   showProviderPill: volatile(z.boolean().default(false)),
   subscriptionProxyUrl: volatile(z.string().default('')),
+  requestCachePrune: volatile(z.boolean().default(true)),
+  requestCacheTtlDays: volatile(z.number().min(1).max(365).default(14)),
+  requestCacheMaxBytes: volatile(z.number().min(0).default(256 * 1024 * 1024)),
+  requestCacheDir: volatile(z.string().default('')),
+  vaultEnabled: volatile(z.boolean().default(true)),
+  vaultDir: volatile(z.string().default('')),
 }) as unknown as z<Config>
 
 /** Resolve exactly one provider profile for a tool call. */
 export function resolveProvider(config: Config):
-  | { provider: 'google'; apiKeyEnv: string; model: string; endpoint: string; aspectRatio: AspectRatio; imageSize: ImageSize }
+  | { provider: 'google'; apiKeyEnv: string; model: string; endpoint: string; native: boolean; aspectRatio: AspectRatio; imageSize: ImageSize }
   | { provider: 'openai'; apiKeyEnv: string; model: string; baseURL: string; imageSize: string }
   | { provider: 'openai-compat'; apiKeyEnv: string; model: string; baseURL: string; imageSize: string; editFormat: CompatEditFormat; editExtra: Record<string, unknown> }
   | { provider: 'seedream'; apiKeyEnv: string; model: string; baseURL: string; imageSize: string; arkOptions: ArkOutputOptions }
@@ -294,7 +349,29 @@ export function resolveProvider(config: Config):
     case 'chatgpt-sub': return { provider: 'chatgpt-sub', model: DEFAULT_SUBSCRIPTION_MODELS['chatgpt-sub'] }
     case 'grok-sub': return { provider: 'grok-sub', model: DEFAULT_SUBSCRIPTION_MODELS['grok-sub'] }
     case 'google-sub': return { provider: 'google-sub', model: DEFAULT_SUBSCRIPTION_MODELS['google-sub'] }
-    case 'google': return { provider: 'google', apiKeyEnv: GOOGLE_API_KEY_ENV, model: config.googleModel ?? DEFAULT_GOOGLE_MODEL, endpoint: config.googleEndpoint ?? DEFAULT_GOOGLE_ENDPOINT, aspectRatio: '1:1', imageSize: '1K' }
+    case 'google': return { provider: 'google', apiKeyEnv: GOOGLE_API_KEY_ENV, model: config.googleModel ?? DEFAULT_GOOGLE_MODEL, endpoint: config.googleEndpoint ?? DEFAULT_GOOGLE_ENDPOINT, native: config.googleNative === true, aspectRatio: '1:1', imageSize: '1K' }
+  }
+}
+
+/** Project one named relay channel onto the legacy flat fields used by all provider adapters. */
+export function withOpenAICompatChannel(config: Config, channelId?: string): Config {
+  const channel = resolveOpenAICompatChannel(config, channelId)
+  if (channel.id === 'default') return { ...config, openaiCompatActiveChannel: 'default' }
+  return {
+    ...config,
+    openaiCompatLabel: channel.label,
+    openaiCompatBaseURL: channel.baseURL,
+    openaiCompatModel: channel.model,
+    openaiCompatModels: channel.models ?? [],
+    openaiCompatEditModel: channel.editModel ?? '',
+    openaiCompatQuality: channel.quality ?? '',
+    openaiCompatQualityOptions: channel.qualityOptions ?? [],
+    openaiCompatExtraBody: channel.extraBody ?? {},
+    openaiCompatEditSizeMode: channel.editSizeMode ?? 'auto',
+    openaiCompatEditFormat: channel.editFormat ?? 'multipart',
+    openaiCompatEditExtra: channel.editExtra ?? {},
+    openaiCompatSizes: channel.sizes ?? {},
+    openaiCompatActiveChannel: channel.id,
   }
 }
 
@@ -302,15 +379,14 @@ export function resolveProvider(config: Config):
  * Apply a per-call provider and/or model override on top of the saved config.
  * `model` is ignored for ComfyUI, whose per-call equivalent is `workflow`.
  */
-export function withProviderOverrides(config: Config, provider?: ImageProvider, model?: string): Config {
+export function withProviderOverrides(config: Config, provider?: ImageProvider, model?: string, mode: 'generate' | 'edit' = 'generate'): Config {
   const base: Config = provider === undefined ? { ...config } : { ...config, provider }
-  if (model === undefined) return base
-  const trimmed = model.trim()
+  const trimmed = model?.trim() || (mode === 'edit' && base.provider === 'openai-compat' ? base.openaiCompatEditModel?.trim() : '') || ''
   if (trimmed.length === 0) return base
   switch (base.provider ?? 'google') {
     case 'google': return { ...base, googleModel: trimmed }
     case 'openai': return { ...base, openaiModel: trimmed }
-    case 'openai-compat': return { ...base, openaiCompatModel: trimmed }
+    case 'openai-compat': return { ...base, openaiCompatModel: trimmed, ...(mode === 'edit' ? { openaiCompatEditModel: trimmed } : {}) }
     case 'seedream': return { ...base, seedreamModel: trimmed }
     case 'dashscope': return { ...base, dashscopeModel: trimmed }
     case 'xai': return { ...base, xaiModel: trimmed }
@@ -339,6 +415,7 @@ export function migrateOpenAICompatConfig(config: Config): Config {
     ...config,
     openaiCompatBaseURL: legacyBase,
     ...(compatModel.length > 0 ? {} : { openaiCompatModel: config.openaiModel }),
+    ...((config.openaiCompatModels?.length ?? 0) > 0 ? {} : { openaiCompatModels: [compatModel || config.openaiModel?.trim() || ''].filter(Boolean) }),
     openaiBaseURL: DEFAULT_OPENAI_BASE_URL,
     ...(config.provider === 'openai' ? { provider: 'openai-compat' as const } : {}),
   }

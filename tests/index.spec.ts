@@ -4,6 +4,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { apply } from '../src/index.js'
+import { THUMB_ROUTE, VAULT_DELETE_ROUTE, VAULT_REFS_ROUTE, ZIP_ROUTE } from '../src/shared.js'
 import { createImageResultDefinition } from '../src/client/image-result-node.js'
 
 function attachment(id: string): ImageAttachmentRef {
@@ -33,15 +34,20 @@ function execWithUserImages(...ids: string[]): never {
   } as never
 }
 
-function harnessContext(): { ctx: Context; tools: ToolDefinition[]; installSection: ReturnType<typeof vi.fn> } {
+function harnessContext(options: { webServer?: boolean } = {}): { ctx: Context; tools: ToolDefinition[]; installSection: ReturnType<typeof vi.fn> } {
   const tools: ToolDefinition[] = []
   const installSection = vi.fn()
+  const hasWebServer = options.webServer ?? true
   const ctx = {
     tools: { register: (tool: ToolDefinition) => { tools.push(tool) } },
     effect: (setup: () => unknown) => setup(),
-    webServer: { register: vi.fn(() => () => {}) },
+    ...(hasWebServer ? { webServer: { register: vi.fn(() => () => {}) } } : {}),
     credentials: { resolve: vi.fn(async () => ({ value: 'test-key' })) },
     inject: (services: readonly string[], callback: (owner: unknown) => void) => {
+      if (services.includes('webServer')) {
+        if (hasWebServer) callback(ctx)
+        return
+      }
       if (services.includes('settings')) callback({ settings: { installSection } })
     },
     attachments: {
@@ -64,6 +70,24 @@ function toolByName(tools: ToolDefinition[], name: string): ToolDefinition {
 }
 
 describe('image tool registration', () => {
+  it('routes native Google generation, batch generation and edits through the configured protocol', async () => {
+    const { ctx, tools } = harnessContext()
+    const fetchMock = vi.fn(async () => Response.json({ candidates: [{ content: { parts: [{ inlineData: { data: 'iVBORw0KGgo=', mimeType: 'image/png' } }] } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    apply(ctx, { provider: 'google', googleNative: true, googleEndpoint: 'https://relay.example/v1beta', googleModel: 'gemini-3-pro-image', saveToWorkspace: false })
+    const exec = { signal: new AbortController().signal } as never
+    await toolByName(tools, 'generate_image').execute({ prompt: 'one' }, exec)
+    await toolByName(tools, 'generate_images').execute({ prompts: ['two', 'three'], image_size: '2K', aspect_ratio: '16:9' }, exec)
+    vi.mocked(ctx.attachments.readImage).mockResolvedValue({ data: new Uint8Array([137, 80, 78, 71]), ref: attachment('source') } as never)
+    await toolByName(tools, 'edit_image').execute({ prompt: 'edit' }, execWithUserImages('source'))
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>
+    expect(calls.every(([url]) => url === 'https://relay.example/v1beta/models/gemini-3-pro-image:generateContent')).toBe(true)
+    expect(calls.map(([, init]) => JSON.parse(String(init.body)).contents[0].parts.at(-1))).toEqual([{ text: 'one' }, { text: 'two' }, { text: 'three' }, { text: 'edit' }])
+    expect(JSON.parse(String(calls[1]![1].body)).generationConfig.imageConfig).toEqual({ aspectRatio: '16:9', imageSize: '2K' })
+    expect(JSON.parse(String(calls[3]![1].body)).contents[0].parts[0].inlineData).toBeDefined()
+  })
+
   it('forwards compatible quality and generation extras through single, batch and edit tools', async () => {
     const { ctx, tools } = harnessContext()
     const fetchMock = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(JSON.stringify({ data: [{ b64_json: 'iVBORw0KGgo=' }] }), { headers: { 'content-type': 'application/json' } }))
@@ -84,6 +108,109 @@ describe('image tool registration', () => {
     expect(editBody).not.toHaveProperty('watermark')
     vi.unstubAllGlobals()
   })
+
+  it('routes a named compat channel with its own credential and returns its channel id', async () => {
+    const { ctx, tools } = harnessContext()
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: [{ b64_json: 'iVBORw0KGgo=' }] }), { headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    apply(ctx, {
+      provider: 'openai-compat',
+      openaiCompatBaseURL: 'https://legacy.example/v1',
+      openaiCompatModel: 'legacy-model',
+      openaiCompatChannels: [{
+        id: 'relay-b', label: 'Relay B', keyRef: '', baseURL: 'https://relay-b.example/v1', model: 'relay-b-model',
+        models: ['relay-b-model'], quality: 'high', extraBody: { watermark: false },
+      }],
+      saveToWorkspace: false,
+    })
+
+    const result = await toolByName(tools, 'generate_image').execute(
+      { prompt: 'one', channel: 'relay-b' },
+      { signal: new AbortController().signal } as never,
+    ) as { channel?: string }
+    expect(result.channel).toBe('relay-b')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://relay-b.example/v1/images/generations')
+    expect(init.headers).toMatchObject({ authorization: 'Bearer test-key' })
+    expect(JSON.parse(String(init.body))).toEqual({ model: 'relay-b-model', prompt: 'one', size: '1024x1024', quality: 'high', watermark: false })
+    expect(JSON.stringify(vi.mocked(ctx.credentials.resolve).mock.calls)).toContain('DSH_IMAGE_GEN_OPENAI_COMPAT_KEY_RELAY_B')
+    await expect(toolByName(tools, 'generate_image').execute(
+      { prompt: 'one', channel: 'missing' },
+      { signal: new AbortController().signal } as never,
+    )).rejects.toThrow('Unknown OpenAI-compatible channel')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('applies the configured cloud timeout to conversation generation', async () => {
+    vi.useFakeTimers()
+    try {
+      const { ctx, tools } = harnessContext()
+      let upstreamSignal: AbortSignal | null | undefined
+      let started!: () => void
+      const generating = new Promise<void>(resolve => { started = resolve })
+      vi.stubGlobal('fetch', vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_, reject) => {
+        upstreamSignal = init?.signal
+        started()
+        upstreamSignal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      })))
+      apply(ctx, {
+        provider: 'openai-compat', openaiCompatBaseURL: 'https://relay.example/v1', openaiCompatModel: 'relay',
+        cloudTimeoutMs: 5_000, saveToWorkspace: false,
+      })
+
+      const executing = toolByName(tools, 'generate_image').execute(
+        { prompt: 'one' },
+        { signal: new AbortController().signal } as never,
+      )
+      const rejection = expect(executing).rejects.toThrow('生图超时（5 秒未返回），请检查网络或代理后重试；上游可能已扣费或仍在生成，请到服务商后台确认')
+      await generating
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(upstreamSignal?.aborted).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      await rejection
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not apply the cloud timeout to ComfyUI conversation generation', async () => {
+    vi.useFakeTimers()
+    try {
+      const { ctx, tools } = harnessContext()
+      let historySignal: AbortSignal | null | undefined
+      let started!: () => void
+      const polling = new Promise<void>(resolve => { started = resolve })
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ prompt_id: 'job-1' }), { status: 200 }))
+        .mockImplementationOnce((_url: unknown, init?: RequestInit) => new Promise<Response>((_, reject) => {
+          historySignal = init?.signal
+          started()
+          historySignal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+        })))
+      apply(ctx, {
+        provider: 'comfyui',
+        comfyuiWorkflowJson: JSON.stringify({ 6: { class_type: 'CLIPTextEncode', inputs: { text: '{{prompt}}' } } }),
+        cloudTimeoutMs: 5_000, comfyuiTimeoutMs: 10_000, saveToWorkspace: false,
+      })
+
+      const executing = toolByName(tools, 'generate_image').execute(
+        { prompt: 'a portrait' },
+        { signal: new AbortController().signal } as never,
+      )
+      const rejection = expect(executing).rejects.toThrow('ComfyUI generation timed out after 10000 ms')
+      await polling
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(historySignal?.aborted).toBe(false)
+      await vi.advanceTimersByTimeAsync(5_000)
+      await rejection
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
   beforeEach(() => { vi.clearAllMocks() })
   afterEach(() => { vi.unstubAllGlobals() })
 
@@ -108,6 +235,33 @@ describe('image tool registration', () => {
     const { ctx, tools } = harnessContext()
     apply(ctx, { provider: 'google', saveToWorkspace: false })
     expect(tools.map(tool => tool.name)).toEqual(['canvas_state', 'view_canvas', 'generate_image', 'generate_images', 'edit_image', 'find_inspiration'])
+  })
+
+  it('does not require webServer, so headless, acp and sdk profiles can activate it', async () => {
+    const plugin = await import('../src/index.js')
+    expect(plugin.inject).not.toContain('webServer')
+  })
+
+  it('registers every tool without a webServer and mounts no routes', async () => {
+    const { ctx, tools } = harnessContext({ webServer: false })
+    apply(ctx, { provider: 'google', googleNative: true, googleEndpoint: 'https://relay.example/v1beta', googleModel: 'gemini-3-pro-image', saveToWorkspace: false })
+    expect(tools.map(tool => tool.name)).toEqual(['canvas_state', 'view_canvas', 'generate_image', 'generate_images', 'edit_image', 'find_inspiration'])
+    const fetchMock = vi.fn(async () => Response.json({ candidates: [{ content: { parts: [{ inlineData: { data: 'iVBORw0KGgo=', mimeType: 'image/png' } }] } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    await toolByName(tools, 'generate_image').execute({ prompt: 'one' }, { signal: new AbortController().signal } as never)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('mounts the same HTTP routes as before when a webServer is present', () => {
+    const { ctx } = harnessContext()
+    apply(ctx, { provider: 'google', saveToWorkspace: false })
+    const paths = vi.mocked((ctx as unknown as { webServer: { register: (route: { path: string }) => unknown } }).webServer.register).mock.calls.map(([route]) => route.path)
+    expect(paths).toHaveLength(21)
+    expect(new Set(paths).size).toBe(21)
+    expect(paths).toContain(ZIP_ROUTE)
+    expect(paths).toContain(THUMB_ROUTE)
+    expect(paths).toContain(VAULT_DELETE_ROUTE)
+    expect(paths).toContain(VAULT_REFS_ROUTE)
   })
 
   it('serves reusable inspiration prompts to the agent with bounded hits', async () => {

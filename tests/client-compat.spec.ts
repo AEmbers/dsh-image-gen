@@ -7,6 +7,36 @@ import * as plugin from '../src/client/index.js'
 import { imageRef } from '../src/client/image-ref.js'
 import { IMAGE_RESULT_NODE_KIND } from '../src/client/image-result-node.js'
 
+function snapshotStore<T>(initial: T) {
+  let value = initial
+  const listeners = new Set<() => void>()
+  return { getSnapshot: () => value, subscribe: (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } },
+    set(next: T) { value = next; for (const fn of listeners) fn() }, listeners }
+}
+
+it('connects a late uiSession service and cleans up both session subscriptions on disposal', async () => {
+  const h = clientHarness({ connection: {}, remote: { credentials: { describe: vi.fn(), set: vi.fn() } } })
+  const list = snapshotStore({ current: 's1' })
+  const source = () => snapshotStore({ entries: [], change: { kind: 'append', entries: [] } })
+  const sources = { s1: source(), s2: source() }
+  const binding = vi.fn((id: keyof typeof sources) => ({ eventSource: sources[id] }))
+  h.ctx.provide('sessions', { list, binding })
+  const fiber = h.ctx.plugin(plugin)
+  await fiber.await()
+  await vi.waitFor(() => expect(sources.s1.listeners.size).toBe(1))
+  const current = snapshotStore<{ key?: string }>({ key: 's2' })
+  h.ctx.provide('uiSession', { adapter: { current } })
+  await vi.waitFor(() => expect(binding).toHaveBeenLastCalledWith('s2'))
+  expect(sources.s1.listeners.size).toBe(0)
+  expect(sources.s2.listeners.size).toBe(1)
+  current.set({})
+  expect(sources.s2.listeners.size).toBe(0)
+  await fiber.dispose()
+  expect(list.listeners.size).toBe(0)
+  expect(current.listeners.size).toBe(0)
+  expect(sources.s1.listeners.size).toBe(0)
+})
+
 const imageResultNodeShape = expect.objectContaining({
   kind: IMAGE_RESULT_NODE_KIND,
   target: 'chat',
@@ -42,7 +72,7 @@ function clientHarness(options: {
   let face: { credentials?: unknown; credentialsAvailable?: () => boolean } | undefined
   const slots = {
     register: vi.fn((registration: { name?: string; inject?: () => { credentials?: unknown; credentialsAvailable?: () => boolean } }, component: unknown) => {
-      if (registration.name === 'settings.plugins.tab') {
+      if (registration.name === 'plugins.bundle.config') {
         face = registration.inject?.()
         credentialsFace = face?.credentials
       }
@@ -129,7 +159,7 @@ describe('DSH client compatibility', () => {
     await fiber.await()
 
     expect(fiber.state).toBe(2)
-    const injectSettingsCard = harness.registrations.get('settings.plugins.tab')
+    const injectSettingsCard = harness.registrations.get('plugins.bundle.config')
     expect(injectSettingsCard).toBeTypeOf('function')
     expect(() => injectSettingsCard?.()).not.toThrow()
     const credentials = harness.injectedCredentials() as {
@@ -162,7 +192,7 @@ describe('DSH client compatibility', () => {
     expect(fiber.state).toBe(2)
     expect(harness.legacyBind).toHaveBeenCalledWith({ namespace: 'image-generation' })
     expect(harness.legacyBind).not.toHaveBeenCalledWith({ namespace: 'ui-chat' })
-    const injectSettingsCard = harness.registrations.get('settings.plugins.tab')
+    const injectSettingsCard = harness.registrations.get('plugins.bundle.config')
     expect(() => injectSettingsCard?.()).not.toThrow()
 
     await fiber.dispose()
@@ -182,7 +212,7 @@ describe('DSH client compatibility', () => {
     // settings UI instead of parking or crashing.
     expect(fiber.state).toBe(2)
     expect(harness.legacyBind).not.toHaveBeenCalled()
-    const injectSettingsCard = harness.registrations.get('settings.plugins.tab')
+    const injectSettingsCard = harness.registrations.get('plugins.bundle.config')
     expect(() => injectSettingsCard?.()).not.toThrow()
     const scope = (harness.settingsFace() as unknown as { scope: { getSnapshot(): unknown } }).scope
     expect(scope.getSnapshot()).toEqual({ value: undefined, writable: false, status: 'unavailable' })
@@ -214,7 +244,7 @@ describe('DSH client compatibility', () => {
     await fiber.await()
 
     expect(fiber.state).toBe(2)
-    const injectSettingsCard = harness.registrations.get('settings.plugins.tab')
+    const injectSettingsCard = harness.registrations.get('plugins.bundle.config')
     expect(() => injectSettingsCard?.()).not.toThrow()
     const scope = (harness.settingsFace() as unknown as {
       scope: {
@@ -245,7 +275,7 @@ describe('DSH client compatibility', () => {
     await fiber.await()
 
     expect(fiber.state).toBe(2)
-    const injectSettingsCard = harness.registrations.get('settings.plugins.tab')
+    const injectSettingsCard = harness.registrations.get('plugins.bundle.config')
     expect(injectSettingsCard).toBeTypeOf('function')
     expect(() => injectSettingsCard?.()).not.toThrow()
     // The face carries a stable delegating proxy, never the raw remote: the
@@ -369,12 +399,12 @@ describe('DSH client compatibility', () => {
     expect(fiber.state).toBe(2)
     // #32 regression guard: the settings card and the composer pill mount even
     // before any credentials service exists; only the key UI degrades.
-    expect(harness.registrations.has('settings.plugins.tab')).toBe(true)
+    expect(harness.registrations.has('plugins.bundle.config')).toBe(true)
     // Hosts that predate the Plugins tab row only ship the per-plugin seat;
     // the same build must keep the card reachable there.
     expect(harness.registrations.has('settings.plugin.item')).toBe(true)
     expect(harness.registrations.has('conversation.input.right')).toBe(true)
-    expect(() => harness.registrations.get('settings.plugins.tab')?.()).not.toThrow()
+    expect(() => harness.registrations.get('plugins.bundle.config')?.()).not.toThrow()
     // The legacy per-plugin seat must stay mountable on the very same build.
     expect(() => harness.registrations.get('settings.plugin.item')?.()).not.toThrow()
     expect(harness.settingsFace()?.credentialsAvailable?.()).toBe(false)
@@ -404,8 +434,8 @@ describe('DSH client compatibility', () => {
     await fiber.await()
 
     expect(fiber.state).toBe(2)
-    expect(harness.registrations.get('settings.plugins.tab')).toBeTypeOf('function')
-    expect(() => harness.registrations.get('settings.plugins.tab')?.()).not.toThrow()
+    expect(harness.registrations.get('plugins.bundle.config')).toBeTypeOf('function')
+    expect(() => harness.registrations.get('plugins.bundle.config')?.()).not.toThrow()
     expect(harness.registrations.has('conversation.input.right')).toBe(true)
     // The key UI reports the degraded state instead of hiding the card.
     expect(harness.settingsFace()?.credentialsAvailable?.()).toBe(false)

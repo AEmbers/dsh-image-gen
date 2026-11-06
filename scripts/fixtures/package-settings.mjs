@@ -96,7 +96,7 @@ globalThis.fetch = async (url, options) => {
   return new Response(JSON.stringify(health()))
 }
 const renderers = new Set()
-async function card(ctx) {
+async function card(ctx, provider = 'openai-compat') {
   let writes = 0
   const read = () => {
     const section = ctx.settings.describe().find(row => row.ns === 'image-gen')
@@ -123,15 +123,20 @@ async function card(ctx) {
   let renderer
   await act(async () => { renderer = create(React.createElement(client.ImageGenerationSettingsCard, props)) })
   renderers.add(renderer)
-  await act(async () => { renderer.root.findByProps({ className: 'dsh-ig-head' }).props.onClick() })
-  const row = () => renderer.root.findAll(node => node.type === 'div' && node.props.className?.startsWith('dsh-ig-provider-row '))
-    .find(node => text(node.findByProps({ className: 'dsh-ig-provider-name' })) === 'OpenAI-compatible (relay)')
-  await act(async () => { row().findByProps({ className: 'dsh-ig-provider-head' }).props.onClick() })
+  // The card renders open on the plugin's own page now, so only the provider
+  // row still needs a click to expand.
+  const rows = () => renderer.root.findAll(node => node.type === 'div' && node.props.className?.startsWith('dsh-ig-provider-row'))
+  const providerLabels = { 'openai-compat': 'OpenAI 兼容', google: 'Google Gemini' }
+  const row = () => rows().find(node => text(node.findByProps({ className: 'dsh-ig-provider-name' })) === providerLabels[provider])
+  const targetRow = row()
+  assert.ok(targetRow, `Missing ${provider}; rendered rows: ${JSON.stringify(rows().map(node => text(node.findByProps({ className: 'dsh-ig-provider-name' }))))}`)
+  await act(async () => { targetRow.findByProps({ className: 'dsh-ig-provider-head' }).props.onClick() })
   const input = type => row().findAllByType('input').find(element => element.props.type === type)
+  const field = label => row().findAllByType('label').find(element => text(element).startsWith(label)).findByType('input')
   const save = async () => { await act(async () => { row().findByType('form').props.onSubmit({ preventDefault() {} }) }) }
   const type = async (kind, value) => { await act(async () => { input(kind).props.onChange({ target: { value } }) }) }
   const close = async () => { await act(async () => { renderer.unmount() }); renderers.delete(renderer) }
-  return { render: () => renderer.toJSON(), row, input, save, type, close, writes: () => writes }
+  return { render: () => renderer.toJSON(), row, input, field, save, type, close, writes: () => writes }
 }
 
 let ctx
@@ -150,21 +155,42 @@ try {
   } else {
     assert.equal(form.input('url').props.disabled, false)
     await form.type('url', 'https://saved.example/v1')
-    await form.type(undefined, 'test-image-model')
+    await act(async () => { form.field('Default model').props.onChange({ target: { value: 'test-image-model' } }) })
+    await act(async () => { form.field('Editing model').props.onChange({ target: { value: 'Qwen/Qwen-Image-Edit-2509' } }) })
+    const editFormat = form.row().findAllByType('select').find(element => element.findAllByType('option').some(option => option.props.value === 'siliconflowJson'))
+    await act(async () => { editFormat.props.onChange({ target: { value: 'siliconflowJson' } }) })
     await form.save()
     await waitFor(() => text(form.row()).includes('Saved'))
     assert.ok(form.writes() > 0)
     assert.ok((await readFile(profile.patchPath, 'utf8')).includes('https://saved.example/v1'))
+    assert.equal(ctx.settings.describe().find(row => row.ns === 'image-gen').value.openaiCompatEditModel, 'Qwen/Qwen-Image-Edit-2509')
+    assert.equal(ctx.settings.describe().find(row => row.ns === 'image-gen').value.openaiCompatEditFormat, 'siliconflowJson')
     await form.close()
     const refreshed = await card(ctx)
     assert.equal(refreshed.input('url').props.value, 'https://saved.example/v1')
-    assert.equal(refreshed.input(undefined).props.value, 'test-image-model')
+    assert.equal(refreshed.field('Default model').props.value, 'test-image-model')
+    assert.equal(refreshed.field('Editing model').props.value, 'Qwen/Qwen-Image-Edit-2509')
     await refreshed.close()
+    const google = await card(ctx, 'google')
+    await act(async () => { google.row().findByType('select').props.onChange({ target: { value: 'native' } }) })
+    await google.type('url', 'https://native.example/v1beta')
+    await google.save()
+    await waitFor(() => text(google.row()).includes('Saved'))
+    assert.equal(ctx.settings.describe().find(row => row.ns === 'image-gen').value.googleNative, true)
+    await google.close()
     await ctx.fiber.dispose()
     ctx = await start()
     const restarted = await card(ctx)
     assert.equal(restarted.input('url').props.value, 'https://saved.example/v1')
-    assert.equal(restarted.input(undefined).props.value, 'test-image-model')
+    assert.equal(restarted.field('Default model').props.value, 'test-image-model')
+    assert.equal(restarted.field('Editing model').props.value, 'Qwen/Qwen-Image-Edit-2509')
+    assert.equal(ctx.settings.describe().find(row => row.ns === 'image-gen').value.openaiCompatEditFormat, 'siliconflowJson')
+    console.log('PASS: separate editing model and SiliconFlow format persist through installed UI, real DSH settings, a fresh form, and host restart')
+    await restarted.close()
+    const nativeRestarted = await card(ctx, 'google')
+    assert.equal(nativeRestarted.row().findByType('select').props.value, 'native')
+    assert.equal(nativeRestarted.input('url').props.value, 'https://native.example/v1beta')
+    console.log('PASS: native Google protocol persists through the installed card, real DSH settings, and host restart')
     console.log('PASS: installed browser save handler + DSH 0.2 profile/editor persists settings across fresh form and host restart')
   }
 } finally {

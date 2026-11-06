@@ -5,6 +5,7 @@ export interface ConversationImageRevision {
     attachment: ImageAttachmentRef;
     prompt: string;
     provider: ImageProvider;
+    channel?: string;
     model: string;
     output: string;
     createdAt: number;

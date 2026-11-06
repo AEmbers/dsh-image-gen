@@ -1,10 +1,12 @@
 /** Multi-provider image-generation Bundle for DeepSeek Harness. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-client-connection'
+import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { SettingsForms } from '@deepseek-ai/dsh-settings'
 import { defineTool, type ToolResult } from '@deepseek-ai/dsh-tools'
-import { Config, migrateOpenAICompatConfig, resolveProvider, selectComfyUIWorkflow, withProviderOverrides, type AspectRatio, type ImageSize } from './config.js'
+import { Config, migrateOpenAICompatConfig, resolveProvider, selectComfyUIWorkflow, withOpenAICompatChannel, withProviderOverrides, type AspectRatio, type ImageSize } from './config.js'
+import { withGenerationTimeout } from './generation-timeout.js'
 import { requireApiKey, resolveApiKey } from './credentials.js'
 import { CanvasMirror } from './canvas-state.js'
 import { serveCanvasState } from './canvas-state-route.js'
@@ -16,12 +18,20 @@ import { editDashScopeImage, generateDashScopeImage } from './dashscope.js'
 import { editGoogleImage, generateGoogleImage } from './google.js'
 import { IMAGE_ROUTE, DELETE_ROUTE, SAVE_WORKSPACE_ROUTE, imageAttachmentFromMeta, serveImage, serveDelete, serveSaveWorkspace } from './image-route.js'
 import { serveImport } from './import-route.js'
+import { serveZip } from './zip-route.js'
+import { serveZipCancel, serveZipProgress } from './zip-progress.js'
+import { serveStorageStats } from './storage-stats.js'
+import { serveVault, serveVaultDelete, serveVaultRefs } from './vault-route.js'
+import { readOriginal, resolveVaultPath } from './vault-store.js'
+import { saveImportedOriginal } from './vault-registry.js'
+import { servePreview, serveThumb } from './thumb-route.js'
+import { durableAttachmentsRoot, pruneRequestImageCache, resolveRequestImageCacheDir } from './request-cache.js'
 import { editOpenAICompatibleImage, generateOpenAICompatibleImage } from './openai-compatible.js'
 import { type ResolvedReferenceImage, resolveReferenceImages } from './reference-image.js'
 import { editSeedreamImage } from './seedream.js'
 import { generateSubscriptionImage, registerSubscriptionRoutes, subscriptionToolParameters, SubscriptionManager } from './subscription.js'
 import { setSubscriptionProxyResolver } from './subscription/proxy.js'
-import { CANVAS_STATE_ROUTE, IMAGE_GENERATION_NAMESPACE, IMAGE_PROVIDERS, IMPORT_ROUTE, INSPIRATION_ROUTE, STUDIO_ROUTE, TEST_CONNECTION_ROUTE, mergeComfyUIPrompt, type ImageProvider } from './shared.js'
+import { CANVAS_STATE_ROUTE, DEFAULT_CLOUD_TIMEOUT_MS, IMAGE_GENERATION_NAMESPACE, IMAGE_PROVIDERS, IMPORT_ROUTE, INSPIRATION_ROUTE, PREVIEW_ROUTE, STORAGE_STATS_ROUTE, STUDIO_ROUTE, TEST_CONNECTION_ROUTE, THUMB_ROUTE, VAULT_DELETE_ROUTE, VAULT_REFS_ROUTE, VAULT_ROUTE, ZIP_CANCEL_ROUTE, ZIP_PROGRESS_ROUTE, ZIP_ROUTE, mergeComfyUIPrompt, resolveOpenAICompatChannel, type ImageProvider } from './shared.js'
 import { createInspirationRoute } from './inspiration-route.js'
 import { BUNDLED_INSPIRATION_CATALOG, searchInspirationCases } from './inspiration.js'
 import { generateFromStudio, describeStudio } from './studio.js'
@@ -32,6 +42,8 @@ import { SETTINGS_HEALTH_ROUTE, type SettingsHealth } from './shared.js'
 import { deleteImageFromWorkspace, getDshWorkspaceRoots, getDshWorkspacesFull, saveImageToWorkspace } from './workspace-save.js'
 import { xaiToolParameters } from './xai-params.js'
 import { compatRequestQuality, officialQualityOptions, validateOfficialSize } from './openai-output.js'
+import { imageToolContext } from './image-tool-context.js'
+import { withWebAdmission, type WebAdmission } from './web-route.js'
 
 export { Config } from './config.js'
 export { IMAGE_ROUTE, DELETE_ROUTE, SAVE_WORKSPACE_ROUTE, imageAttachmentFromMeta } from './image-route.js'
@@ -42,11 +54,12 @@ export { TEST_CONNECTION_ROUTE } from './shared.js'
 export { CANVAS_STATE_ROUTE } from './shared.js'
 
 export const name = 'dsh-image-gen'
-export const inject = ['tools', 'attachments', 'credentials', 'webServer']
+export const inject = ['tools', 'attachments', 'credentials']
 
 interface GeneratedValue {
   attachment: ImageAttachmentRef
   provider: ImageProvider
+  channel?: string
   model: string
   output: string
   savedTo?: string
@@ -66,11 +79,25 @@ interface SingleGenerationArgs {
   prompt: string
   provider?: string
   model?: string
+  channel?: string
   aspect_ratio?: string
   image_size?: string
   size?: string
   quality?: string
   workflow?: string
+}
+
+/** Optional strings from tool callers may contain empty placeholders (#86). */
+function cleanImageToolArgs<T extends SingleGenerationArgs>(args: T): T {
+  const clean = { ...args }
+  const fields = clean as Record<string, unknown>
+  for (const key of ['model', 'channel', 'size', 'aspect_ratio', 'image_size', 'quality', 'workflow']) {
+    const value = fields[key]
+    if (typeof value !== 'string') continue
+    if (value.trim().length === 0) delete fields[key]
+    else fields[key] = value.trim()
+  }
+  return clean
 }
 
 /** Ordered per-item outcomes for the generate_images batch tool. */
@@ -86,6 +113,12 @@ function providerOverrideOf(value: unknown): ImageProvider | undefined {
     throw new Error(`Unsupported provider ${JSON.stringify(value)}. Supported providers: ${IMAGE_PROVIDERS.join(', ')}.`)
   }
   return value as ImageProvider
+}
+
+function configForToolCall(config: Config, provider: ImageProvider | undefined, channel: string | undefined): Config {
+  const selected = provider ?? config.provider ?? 'google'
+  if (channel !== undefined && selected !== 'openai-compat') throw new Error('The channel argument is only supported with provider=openai-compat.')
+  return selected === 'openai-compat' ? withOpenAICompatChannel(config, channel) : config
 }
 
 export function apply(ctx: Context, config: Config = {}): void {
@@ -117,94 +150,228 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Only the subscription calls may leave through a proxy; the URL is read from
   // the live config on every request, so a settings edit lands without a reload.
   setSubscriptionProxyResolver(() => current().subscriptionProxyUrl ?? '')
-  registerSubscriptionRoutes(ctx, subscriptionManager)
+  // Prompt contexts are synchronous, while credential and login reads are not.
+  let configuredImageProviders: readonly string[] | undefined
+  let imageContextRevision = 0
+  const refreshImageToolContext = async () => {
+    const revision = ++imageContextRevision
+    const config = current()
+    try {
+      const description = await describeStudio(ctx, config, subscriptionManager)
+      const providers = description.providers.filter(profile => profile.configured).map(profile => profile.provider === 'openai-compat' && profile.channel !== undefined
+        ? `${profile.provider} (channel: ${profile.channel})`
+        : profile.provider)
+      if (revision === imageContextRevision) configuredImageProviders = providers
+    } catch { /* Keep the last credential-free snapshot when status reads fail. */ }
+  }
+
+  // Raw-image vault: off by default only when explicitly disabled; paths and
+  // caps are re-read on every call so settings changes apply without a restart.
+  const vaultConfig = () => {
+    const config = current()
+    return {
+      enabled: config.vaultEnabled !== false,
+      // Relative overrides stay below the DSH home instead of the process cwd.
+      dir: resolveVaultPath(config.vaultDir ?? ''),
+    }
+  }
 
   const settingsHealth = installImageSettings(ctx, current(), {
     setSource: source => { current = () => migrateOpenAICompatConfig(plainConfig(source())) },
-    onChange: () => {},
+    onChange: () => { void refreshImageToolContext() },
   })
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact', path: SETTINGS_HEALTH_ROUTE,
-    handler: (req, res) => serveSettingsHealth(req, res, settingsHealth()),
-  }), 'dsh-image-gen: settings health')
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact', path: IMAGE_ROUTE,
-    handler: (req, res) => serveImage(req, res, { readImage: ref => ctx.attachments.readImage(ref) }),
-  }), 'dsh-image-gen: image route')
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact', path: IMPORT_ROUTE,
-    handler: (req, res) => serveImport(req, res, {
-      saveImage: image => ctx.attachments.saveImage(image),
-      maxImageBytes: ctx.attachments.imageLimits.maxImageBytes,
-      mediaTypes: ctx.attachments.imageLimits.mediaTypes,
-    }),
-  }), 'dsh-image-gen: import route')
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact', path: DELETE_ROUTE,
-    handler: (req, res) => serveDelete(req, res, {
-      deleteWorkspaceImage: async filePath => {
-        const discovered = await getDshWorkspaceRoots().catch(() => [])
-        return deleteImageFromWorkspace(filePath, new Set([...knownWorkspaceRoots, ...discovered, process.cwd()]))
-      },
-    }),
-  }), 'dsh-image-gen: delete route')
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact', path: SAVE_WORKSPACE_ROUTE,
-    handler: (req, res) => serveSaveWorkspace(req, res, {
-      readImage: ref => ctx.attachments.readImage(ref),
-      saveToWorkspace: options => {
-        if (options.workspaceRoot) {
-          knownWorkspaceRoots.add(options.workspaceRoot)
-        }
-        return saveImageToWorkspace({
-          workspaceRoot: options.workspaceRoot,
-          folder: current().workspaceFolder,
-          attachmentId: options.attachmentId,
-          mediaType: options.mediaType,
-          data: options.data,
+  // Request-image variants are generated on demand and cached forever by the
+  // attachment backend; keep that cache bounded without touching fresh files.
+  ctx.effect(() => {
+    const run = (): void => {
+      const config = current()
+      if (config.requestCachePrune === false) return
+      const ttlDays = config.requestCacheTtlDays ?? 14
+      const maxBytes = config.requestCacheMaxBytes ?? 256 * 1024 * 1024
+      const configured = config.requestCacheDir ?? ''
+      const dir = configured.length > 0 ? configured : resolveRequestImageCacheDir()
+      void pruneRequestImageCache({
+        dir,
+        ttlMs: ttlDays * 24 * 60 * 60 * 1000,
+        maxBytes,
+        // Never prune the durable attachment objects or raw vault originals,
+        // even when requestCacheDir is a Windows case variant or a junction.
+        protectedRoots: [durableAttachmentsRoot(), vaultConfig().dir],
+      })
+        .then(stats => {
+          if (stats.removed > 0) {
+            ctx.logger.info('dsh-image-gen: pruned ' + String(stats.removed) + ' request-image variants (' + String(stats.freedBytes) + ' bytes)')
+          }
         })
+        .catch((error: unknown) => {
+          ctx.logger.warn('dsh-image-gen: request-image cache prune failed: ' + (error instanceof Error ? error.message : String(error)))
+        })
+    }
+    const startup = setTimeout(run, 30_000)
+    const daily = setInterval(run, 24 * 60 * 60 * 1000)
+    startup.unref()
+    daily.unref()
+    return () => {
+      clearTimeout(startup)
+      clearInterval(daily)
+    }
+  }, 'dsh-image-gen: request image cache upkeep')
+  let webAdmission: WebAdmission | undefined
+  ctx.inject(['connection'], (connectionCtx: Context) => {
+    webAdmission = request => connectionCtx.connection.requestRejection(request)
+  })
+  // Every HTTP surface needs webServer, which only the web-app bundle (web,
+  // desktop) provides; the headless, acp and sdk profiles have none. Mount the
+  // routes when it is present so the tools below still activate without it.
+  ctx.inject(['webServer'], (webCtx: Context) => {
+    const register = (route: WebRoute) => webCtx.webServer.register(withWebAdmission(route, () => webAdmission))
+    registerSubscriptionRoutes(webCtx, subscriptionManager, () => webAdmission)
+    webCtx.effect(() => register({
+      kind: 'exact', path: SETTINGS_HEALTH_ROUTE,
+      handler: (req, res) => serveSettingsHealth(req, res, settingsHealth()),
+    }), 'dsh-image-gen: settings health')
+    webCtx.effect(() => register({
+      kind: 'exact', path: IMAGE_ROUTE,
+      handler: (req, res) => serveImage(req, res, { readImage: ref => ctx.attachments.readImage(ref) }),
+    }), 'dsh-image-gen: image route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: THUMB_ROUTE,
+      handler: (req, res) => serveThumb(req, res, {
+        readImageRequest: (ref, target, signal) => ctx.attachments.readImageRequest(ref, target, signal),
+      }),
+    }), 'dsh-image-gen: thumbnail route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: PREVIEW_ROUTE,
+      handler: (req, res) => servePreview(req, res, {
+        readImageRequest: (ref, target, signal) => ctx.attachments.readImageRequest(ref, target, signal),
+      }),
+    }), 'dsh-image-gen: preview route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: IMPORT_ROUTE,
+      handler: (req, res) => serveImport(req, res, {
+        saveImage: image => ctx.attachments.saveImage(image),
+        maxImageBytes: ctx.attachments.imageLimits.maxImageBytes,
+        mediaTypes: ctx.attachments.imageLimits.mediaTypes,
+        // Warm the 320 px gallery tile while the import response is still fresh,
+        // so the first gallery scroll hits the on-disk request-image cache.
+        warmThumbnail: ref => {
+          void ctx.attachments.readImageRequest(ref, { width: 320, height: 320, maxBytes: 96 * 1024 }).catch(() => undefined)
+        },
+        saveOriginal: input => saveImportedOriginal(vaultConfig(), input, typeof req.headers['x-dsh-vault-profile'] === 'string' ? req.headers['x-dsh-vault-profile'] : undefined),
+      }),
+    }), 'dsh-image-gen: import route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: ZIP_ROUTE,
+      handler: (req, res) => serveZip(req, res, {
+        readImage: ref => ctx.attachments.readImage(ref),
+        readVault: (key, mediaType) => readOriginal(vaultConfig(), key, mediaType),
+        maxEntries: 2000,
+      }),
+    }), 'dsh-image-gen: zip export route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: ZIP_PROGRESS_ROUTE,
+      handler: (req, res) => serveZipProgress(req, res),
+    }), 'dsh-image-gen: zip progress route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: ZIP_CANCEL_ROUTE,
+      handler: (req, res) => serveZipCancel(req, res),
+    }), 'dsh-image-gen: zip cancel route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: VAULT_ROUTE,
+      handler: (req, res) => serveVault(req, res, vaultConfig()),
+    }), 'dsh-image-gen: vault route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: VAULT_REFS_ROUTE,
+      handler: (req, res) => serveVaultRefs(req, res, vaultConfig()),
+    }), 'dsh-image-gen: vault refs route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: VAULT_DELETE_ROUTE,
+      handler: (req, res) => serveVaultDelete(req, res, vaultConfig()),
+    }), 'dsh-image-gen: vault delete route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: STORAGE_STATS_ROUTE,
+      handler: (req, res) => {
+        const configured = current().requestCacheDir?.trim() ?? ''
+        void serveStorageStats(req, res, { requestImagesRoot: configured.length > 0 ? configured : resolveRequestImageCacheDir() })
       },
-      getActiveWorkspaceRoot: () => Array.from(knownWorkspaceRoots)[0] || process.cwd(),
-      getAllowedWorkspaceRoots: async () => {
-        const discovered = await getDshWorkspaceRoots().catch(() => [])
-        return new Set([...knownWorkspaceRoots, ...discovered, process.cwd()])
-      },
-      isSaveEnabled: () => current().saveToWorkspace !== false,
-    }),
-  }), 'dsh-image-gen: save workspace route')
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact', path: TEST_CONNECTION_ROUTE,
-    handler: (req, res) => serveTestConnection(req, res, {
-      resolveKey: provider => resolveApiKey(ctx, provider),
-      config: () => current(),
-      subscriptionManager,
-    }),
-  }), 'dsh-image-gen: test connection route')
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact', path: CANVAS_STATE_ROUTE,
-    handler: (req, res) => serveCanvasState(req, res, {
-      mirror: canvasMirror,
-      // Base64 inflates the PNG by ~4/3; the slack covers the JSON envelope.
-      maxBodyBytes: Math.ceil(ctx.attachments.imageLimits.maxImageBytes * 1.4) + 256 * 1024,
-      maxImageBytes: ctx.attachments.imageLimits.maxImageBytes,
-    }),
-  }), 'dsh-image-gen: canvas state route')
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact', path: CANVAS_ASSET_ROUTE,
-    handler: (req, res) => serveCanvasAsset(req, res, {
-      maxImageBytes: ctx.attachments.imageLimits.maxImageBytes,
-      saveImage: image => ctx.attachments.saveImage(image),
-    }),
-  }), 'dsh-image-gen: canvas asset route')
+    }), 'dsh-image-gen: storage stats route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: DELETE_ROUTE,
+      handler: (req, res) => serveDelete(req, res, {
+        deleteWorkspaceImage: async filePath => {
+          const discovered = await getDshWorkspaceRoots().catch(() => [])
+          return deleteImageFromWorkspace(filePath, new Set([...knownWorkspaceRoots, ...discovered, process.cwd()]))
+        },
+      }),
+    }), 'dsh-image-gen: delete route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: SAVE_WORKSPACE_ROUTE,
+      handler: (req, res) => serveSaveWorkspace(req, res, {
+        readImage: ref => ctx.attachments.readImage(ref),
+        saveToWorkspace: options => {
+          if (options.workspaceRoot) {
+            knownWorkspaceRoots.add(options.workspaceRoot)
+          }
+          return saveImageToWorkspace({
+            workspaceRoot: options.workspaceRoot,
+            folder: current().workspaceFolder,
+            attachmentId: options.attachmentId,
+            mediaType: options.mediaType,
+            data: options.data,
+          })
+        },
+        getActiveWorkspaceRoot: () => Array.from(knownWorkspaceRoots)[0] || process.cwd(),
+        getAllowedWorkspaceRoots: async () => {
+          const discovered = await getDshWorkspaceRoots().catch(() => [])
+          return new Set([...knownWorkspaceRoots, ...discovered, process.cwd()])
+        },
+        isSaveEnabled: () => current().saveToWorkspace !== false,
+      }),
+    }), 'dsh-image-gen: save workspace route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: TEST_CONNECTION_ROUTE,
+      handler: (req, res) => serveTestConnection(req, res, {
+        resolveKey: (provider, channel) => resolveApiKey(ctx, provider, provider === 'openai-compat' ? resolveOpenAICompatChannel(current(), channel).keyRef : undefined),
+        config: () => current(),
+        subscriptionManager,
+      }),
+    }), 'dsh-image-gen: test connection route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: CANVAS_STATE_ROUTE,
+      handler: (req, res) => serveCanvasState(req, res, {
+        mirror: canvasMirror,
+        // Base64 inflates the PNG by ~4/3; the slack covers the JSON envelope.
+        maxBodyBytes: Math.ceil(ctx.attachments.imageLimits.maxImageBytes * 1.4) + 256 * 1024,
+        maxImageBytes: ctx.attachments.imageLimits.maxImageBytes,
+      }),
+    }), 'dsh-image-gen: canvas state route')
+    webCtx.effect(() => register({
+      kind: 'exact', path: CANVAS_ASSET_ROUTE,
+      handler: (req, res) => serveCanvasAsset(req, res, {
+        maxImageBytes: ctx.attachments.imageLimits.maxImageBytes,
+        saveImage: image => ctx.attachments.saveImage(image),
+      }),
+    }), 'dsh-image-gen: canvas asset route')
+  })
   // A few lines of live canvas context per model request. The service is an
   // optional dependency: hosts without dsh-system-prompt boot unchanged and
   // the canvas tools remain the model's way to discover the canvas.
   ctx.inject(['systemPrompt'], (promptCtx: Context) => {
-    promptCtx.systemPrompt.context({
+    void refreshImageToolContext()
+    ctx.inject(['credentials'], credentialCtx => {
+      credentialCtx.on('credentials/reference-updated', () => { void refreshImageToolContext() })
+      credentialCtx.on('credentials/record-updated', () => { void refreshImageToolContext() })
+    })
+    promptCtx.effect(() => promptCtx.systemPrompt.context({
+      name: 'dsh-image-gen:image-defaults',
+      order: 59,
+      text: () => imageToolContext(current(), configuredImageProviders),
+    }), 'dsh-image-gen: image tool context')
+    promptCtx.effect(() => promptCtx.systemPrompt.context({
       name: 'dsh-image-gen:canvas',
       order: 60,
       text: () => canvasMirror.digest(),
-    })
+    }), 'dsh-image-gen: canvas context')
   })
   registerCanvasTools(ctx, canvasMirror, {
     // Materialization hook: view_canvas persists a screenshot only when the
@@ -212,39 +379,45 @@ export function apply(ctx: Context, config: Config = {}): void {
     // views, and dead screenshots never reach the disk.
     persistSelectionImage: image => ctx.attachments.saveImage({ data: image.data, mediaType: image.mediaType, name: 'canvas-selection' }),
   })
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact', path: STUDIO_ROUTE,
-    handler: (req, res) => serveStudio(req, res, {
-      describe: async () => {
-        const base = await describeStudio(ctx, current(), subscriptionManager)
-        const workspaces = await getDshWorkspacesFull().catch(() => [])
-        const activeRoot = Array.from(knownWorkspaceRoots)[0] || workspaces[0]?.path || process.cwd()
-        return {
-          ...base,
-          workspaceRoot: activeRoot,
-          workspaces,
-        }
+  ctx.inject(['webServer'], (webCtx: Context) => {
+    const register = (route: WebRoute) => webCtx.webServer.register(withWebAdmission(route, () => webAdmission))
+    webCtx.effect(() => register({
+      kind: 'exact', path: STUDIO_ROUTE,
+      handler: (req, res) => serveStudio(req, res, {
+        describe: async () => {
+          const base = await describeStudio(ctx, current(), subscriptionManager)
+          const workspaces = await getDshWorkspacesFull().catch(() => [])
+          const activeRoot = Array.from(knownWorkspaceRoots)[0] || workspaces[0]?.path || process.cwd()
+          return {
+            ...base,
+            workspaceRoot: activeRoot,
+            workspaces,
+          }
+        },
+        generate: (input, signal) => {
+          const fallbackRoot = Array.from(knownWorkspaceRoots)[0] || process.cwd()
+          return generateFromStudio(ctx, current(), input, signal, fallbackRoot, subscriptionManager)
+        },
+        maxBodyBytes: Math.ceil(ctx.attachments.imageLimits.maxImageBytes * 1.4 * 5) + 256 * 1024,
+        timeoutMs: current().cloudTimeoutMs ?? DEFAULT_CLOUD_TIMEOUT_MS,
+      }),
+    }), 'dsh-image-gen: studio route')
+    const serveInspiration = createInspirationRoute()
+    webCtx.effect(() => register({
+      kind: 'prefix', path: INSPIRATION_ROUTE,
+      handler: (req, res) => {
+        const originalUrl = req.url ?? '/'
+        req.url = originalUrl.startsWith(INSPIRATION_ROUTE) ? originalUrl.slice(INSPIRATION_ROUTE.length) || '/' : originalUrl
+        return serveInspiration(req, res)
       },
-      generate: (input, signal) => {
-        const fallbackRoot = Array.from(knownWorkspaceRoots)[0] || process.cwd()
-        return generateFromStudio(ctx, current(), input, signal, fallbackRoot, subscriptionManager)
-      },
-      maxBodyBytes: Math.ceil(ctx.attachments.imageLimits.maxImageBytes * 1.4 * 5) + 256 * 1024,
-    }),
-  }), 'dsh-image-gen: studio route')
-  const serveInspiration = createInspirationRoute()
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'prefix', path: INSPIRATION_ROUTE,
-    handler: (req, res) => {
-      const originalUrl = req.url ?? '/'
-      req.url = originalUrl.startsWith(INSPIRATION_ROUTE) ? originalUrl.slice(INSPIRATION_ROUTE.length) || '/' : originalUrl
-      return serveInspiration(req, res)
-    },
-  }), 'dsh-image-gen: inspiration route')
+    }), 'dsh-image-gen: inspiration route')
+  })
 
   /** Per-item generation request shared by generate_image and generate_images. */
-  const generateSingle = async (args: SingleGenerationArgs, exec: { agent?: { session: { header: { cwd?: string } } }; signal: AbortSignal }): Promise<GeneratedValue> => {
-    const active = resolveProvider(withProviderOverrides(current(), providerOverrideOf(args.provider), args.model))
+  const generateSingle = async (rawArgs: SingleGenerationArgs, exec: { agent?: { session: { header: { cwd?: string } } }; signal: AbortSignal }): Promise<GeneratedValue> => {
+    const args = cleanImageToolArgs(rawArgs)
+    const requestConfig = configForToolCall(current(), providerOverrideOf(args.provider), args.channel)
+    const active = resolveProvider(withProviderOverrides(requestConfig, providerOverrideOf(args.provider), args.model))
     if (active.provider === 'comfyui') {
       const workflow = selectComfyUIWorkflow(active, args.workflow)
       const generated = await generateComfyUIImage({
@@ -269,21 +442,23 @@ export function apply(ctx: Context, config: Config = {}): void {
       })
       return saveGenerated(ctx, generated, active.provider, active.model, 'subscription', current(), exec, knownWorkspaceRoots)
     }
-    const credential = await requireApiKey(ctx, active.provider, 'generate_image')
+    const runCloud = <T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> =>
+      withGenerationTimeout(current().cloudTimeoutMs ?? DEFAULT_CLOUD_TIMEOUT_MS, exec.signal, operation)
+    const credential = await requireApiKey(ctx, active.provider, 'generate_image', active.provider === 'openai-compat' ? resolveOpenAICompatChannel(requestConfig, args.channel).keyRef : undefined)
     if (active.provider === 'google') {
       const aspectRatio = (args.aspect_ratio ?? active.aspectRatio) as AspectRatio
       const imageSize = (args.image_size ?? active.imageSize) as ImageSize
-      const generated = await generateGoogleImage({ apiKey: credential, endpoint: active.endpoint, model: active.model, prompt: args.prompt, aspectRatio, imageSize, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal })
+      const generated = await runCloud(signal => generateGoogleImage({ apiKey: credential, endpoint: active.endpoint, native: active.native, model: active.model, prompt: args.prompt, aspectRatio, imageSize, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal }))
       return saveGenerated(ctx, generated, active.provider, active.model, `${aspectRatio}, ${imageSize}`, current(), exec, knownWorkspaceRoots)
     }
     if (active.provider === 'dashscope') {
       const size = args.size ?? active.imageSize
-      const generated = await generateDashScopeImage({ apiKey: credential, endpoint: active.endpoint, model: active.model, prompt: args.prompt, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal })
+      const generated = await runCloud(signal => generateDashScopeImage({ apiKey: credential, endpoint: active.endpoint, model: active.model, prompt: args.prompt, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal }))
       return saveGenerated(ctx, generated, active.provider, active.model, size, current(), exec, knownWorkspaceRoots)
     }
     if (active.provider === 'xai') {
       const extraBody = xaiToolParameters({ ...(args.aspect_ratio !== undefined ? { aspectRatio: args.aspect_ratio } : {}), ...(args.image_size !== undefined ? { imageSize: args.image_size } : {}), ...(args.size !== undefined ? { size: args.size } : {}) })
-      const generated = await generateOpenAICompatibleImage({ provider: 'xai', apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, extraBody, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal })
+      const generated = await runCloud(signal => generateOpenAICompatibleImage({ provider: 'xai', apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, extraBody, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal }))
       return saveGenerated(ctx, generated, active.provider, active.model, extraBody.aspect_ratio ?? 'auto', current(), exec, knownWorkspaceRoots)
     }
     const size = args.size ?? active.imageSize
@@ -291,10 +466,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     // provider in this branch ignores them.
     const arkOptions = active.provider === 'seedream' ? active.arkOptions : undefined
     if (active.provider === 'openai') validateOfficialSize(active.model, size)
-    const quality = active.provider === 'openai-compat' ? compatRequestQuality(current(), args.quality) : active.provider === 'openai' ? args.quality : undefined
+    const quality = active.provider === 'openai-compat' ? compatRequestQuality(requestConfig, args.quality) : active.provider === 'openai' ? args.quality : undefined
     if (active.provider === 'openai' && quality !== undefined && !officialQualityOptions(active.model).some(option => option.value === quality)) throw new Error('该 OpenAI 模型不支持所选生成质量')
-    const generated = await generateOpenAICompatibleImage({ provider: active.provider, apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, ...(quality === undefined ? {} : { quality }), ...(active.provider === 'openai-compat' ? { extraBody: current().openaiCompatExtraBody ?? {} } : {}), ...(arkOptions === undefined ? {} : { arkOptions }) })
-    return saveGenerated(ctx, generated, active.provider, active.model, quality === undefined ? size : `${size}, quality=${quality}`, current(), exec, knownWorkspaceRoots)
+    const generated = await runCloud(signal => generateOpenAICompatibleImage({ provider: active.provider, apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal, ...(quality === undefined ? {} : { quality }), ...(active.provider === 'openai-compat' ? { extraBody: requestConfig.openaiCompatExtraBody ?? {} } : {}), ...(arkOptions === undefined ? {} : { arkOptions }) }))
+    const value = await saveGenerated(ctx, generated, active.provider, active.model, quality === undefined ? size : `${size}, quality=${quality}`, current(), exec, knownWorkspaceRoots)
+    return active.provider === 'openai-compat' ? { ...value, channel: resolveOpenAICompatChannel(requestConfig, args.channel).id } : value
   }
 
   ctx.tools.register(defineTool({
@@ -302,11 +478,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     description: 'Generate a new image with the configured provider. Use when the user asks to create or draw a new image; use edit_image instead when they want to change an existing image. Give a complete visual prompt including subject, composition, style, lighting, and any exact text that should appear. The optional provider/model arguments switch provider or model for this call only when the user asks for a specific one. A successful image is attached directly to the conversation and may also be saved under the session workspace. Do not call read, glob, or other tools to locate or verify the image.',
     parameters: {
       prompt: { type: 'string', required: true, description: 'Complete description of the image to generate.' },
-      provider: { type: 'string', enum: ['google', 'openai', 'openai-compat', 'seedream', 'dashscope', 'xai', 'zhipu', 'comfyui', 'chatgpt-sub', 'grok-sub', 'google-sub'], description: 'Optional provider for this call only (for example when the user asks to use a specific provider); omit to use the configured default. chatgpt-sub, grok-sub, and google-sub generate through the logged-in subscription account instead of an API key.' },
-      model: { type: 'string', description: 'Optional model name for this call only, overriding the configured model. Not used by ComfyUI (use workflow instead) nor by the subscription providers (model fixed by the subscription).' },
+      provider: { type: 'string', enum: ['google', 'openai', 'openai-compat', 'seedream', 'dashscope', 'xai', 'zhipu', 'comfyui', 'chatgpt-sub', 'grok-sub', 'google-sub'], description: 'OMIT unless the user explicitly requests a specific image provider. Omission uses the saved default; never guess a channel or fill this with an empty string. chatgpt-sub, grok-sub, and google-sub use logged-in subscription accounts instead of API keys.' },
+      model: { type: 'string', description: 'OMIT unless the user explicitly requests a specific model; omission uses the configured model. Optional override for this call only. Not used by ComfyUI (use workflow instead) nor by the subscription providers (model fixed by the subscription).' },
+      channel: { type: 'string', description: 'Optional configured OpenAI-compatible channel id for this call only. Only meaningful with provider=openai-compat; omit to use the active channel.' },
       aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9'], description: 'Optional output aspect ratio for Google Gemini, xAI Grok, and subscription channels.' },
-      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K).' },
-      size: { type: 'string', description: 'Optional dimensions or size tier for OpenAI, Seedream, or DashScope; WIDTHxHEIGHT maps to aspect_ratio for xAI Grok.' },
+      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K). NEVER send this for chatgpt-sub; omit unused fields entirely.' },
+      size: { type: 'string', description: 'Optional dimensions or size tier for OpenAI, Seedream, or DashScope; WIDTHxHEIGHT maps to aspect_ratio for xAI Grok. Do not combine with aspect_ratio; omit instead of using an empty string.' },
       quality: { type: 'string', description: 'Optional generation quality for OpenAI or compatible APIs, independent of pixel size (e.g. auto, low, medium, high). Omit to use the configured default.' },
       workflow: { type: 'string', description: 'Optional name of the ComfyUI workflow to run; omit to use the active workflow from settings. Only meaningful when the ComfyUI provider is selected.' },
     },
@@ -322,10 +499,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     description: 'Generate several images in one call, one per prompt, in order. Use for batches, variations, or illustration sets; prefer generate_image for a single image. Every successful image is attached to the conversation and may be saved under the session workspace. Items generate sequentially; a failed item is reported in the failures list and does not abort the rest. The optional provider/model/size arguments apply to every item.',
     parameters: {
       prompts: { type: 'array', items: { type: 'string' }, required: true, description: 'Ordered complete prompts; one image is generated per entry (1-10).' },
-      provider: { type: 'string', enum: ['google', 'openai', 'openai-compat', 'seedream', 'dashscope', 'xai', 'zhipu', 'comfyui', 'chatgpt-sub', 'grok-sub', 'google-sub'], description: 'Optional provider for this call only, applied to every item; omit to use the configured default.' },
-      model: { type: 'string', description: 'Optional model name for this call only, applied to every item.' },
+      provider: { type: 'string', enum: ['google', 'openai', 'openai-compat', 'seedream', 'dashscope', 'xai', 'zhipu', 'comfyui', 'chatgpt-sub', 'grok-sub', 'google-sub'], description: 'OMIT unless the user explicitly requests a specific image provider. Uses the saved default for all items; never guess a channel or fill unused fields with empty strings.' },
+      model: { type: 'string', description: 'OMIT unless the user explicitly requests a specific model for every item; omission uses the configured model.' },
+      channel: { type: 'string', description: 'Optional configured OpenAI-compatible channel id applied to every item; omit to use the active channel.' },
       aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9'], description: 'Optional output aspect ratio for Google Gemini, xAI Grok, and subscription channels.' },
-      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K).' },
+      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K). NEVER send this for chatgpt-sub; omit unused fields entirely.' },
       size: { type: 'string', description: 'Optional dimensions or size tier for OpenAI, Seedream, or DashScope; WIDTHxHEIGHT maps to aspect_ratio for xAI Grok.' },
       quality: { type: 'string', description: 'Optional OpenAI or compatible generation quality, applied to every item independently of size.' },
       workflow: { type: 'string', description: 'Optional name of the ComfyUI workflow to run; omit to use the active workflow from settings.' },
@@ -337,7 +515,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             attachment: { type: 'object', required: true, additionalProperties: false, properties: {
               attachmentId: { type: 'string', required: true }, mediaType: { type: 'string', required: true }, bytes: { type: 'integer', required: true }, width: { type: 'integer', required: true }, height: { type: 'integer', required: true }, name: { type: 'string' }, originalDimensions: { type: 'object', additionalProperties: false, properties: { width: { type: 'integer', required: true }, height: { type: 'integer', required: true } } },
             } },
-            provider: { type: 'string', required: true }, model: { type: 'string', required: true }, output: { type: 'string', required: true }, savedTo: { type: 'string' }, saveError: { type: 'string' }, seed: { type: 'integer' }, prompt: { type: 'string', required: true },
+            provider: { type: 'string', required: true }, channel: { type: 'string' }, model: { type: 'string', required: true }, output: { type: 'string', required: true }, savedTo: { type: 'string' }, saveError: { type: 'string' }, seed: { type: 'integer' }, prompt: { type: 'string', required: true },
           } } },
           failures: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
             index: { type: 'integer', required: true }, prompt: { type: 'string', required: true }, error: { type: 'string', required: true },
@@ -372,6 +550,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             prompt,
             ...(args.provider !== undefined ? { provider: args.provider } : {}),
             ...(args.model !== undefined ? { model: args.model } : {}),
+            ...(args.channel !== undefined ? { channel: args.channel } : {}),
             ...(args.aspect_ratio !== undefined ? { aspect_ratio: args.aspect_ratio } : {}),
             ...(args.image_size !== undefined ? { image_size: args.image_size } : {}),
             ...(args.size !== undefined ? { size: args.size } : {}),
@@ -393,22 +572,25 @@ export function apply(ctx: Context, config: Config = {}): void {
     description: 'Edit, combine, or restyle existing images with the configured provider. Images attached inline to the latest human message are already readable DSH attachments even when no workspace file exists. In that case, call edit_image immediately with prompt only; NEVER call read_image, glob, or shell to locate them, and NEVER invent @ paths. All inline images will be used in upload order. For specific older conversation images use source_attachment_id or source_attachment_ids; both canonical sha256: IDs and full bare SHA-256 digests are accepted. For files the user explicitly names in the workspace use source_path or source_paths. For what the user selected or drew on the image-gen workbench canvas (for example a hand-drawn sketch) use source=canvas_selection; canvas_state can verify a selection exists first. Provide exactly one selector field. Without a selector, images from the latest human message take priority; only when that message has no images does editing fall back to the newest conversation image. When the user wants a person, character, or object from the reference images kept as the same identity, write short hard identity-preservation instructions (use the same subject from the references; do not redesign it or synthesize a similar-looking replacement; change only scene, clothing, pose, lighting, style, or composition) instead of long generic appearance descriptions, which make the model replace the subject with a synthesized lookalike.',
     parameters: {
       prompt: { type: 'string', required: true, description: 'Describe the changes to make while preserving everything else that should remain.' },
-      provider: { type: 'string', enum: ['google', 'openai', 'openai-compat', 'seedream', 'dashscope', 'xai', 'zhipu', 'comfyui', 'chatgpt-sub', 'grok-sub', 'google-sub'], description: 'Optional provider for this call only (for example when the user asks to use a specific provider); omit to use the configured default. chatgpt-sub, grok-sub, and google-sub edit images through the logged-in subscription account instead of an API key.' },
-      model: { type: 'string', description: 'Optional model name for this call only, overriding the configured model. Not used by ComfyUI (use workflow instead) nor by the subscription providers (model fixed by the subscription).' },
+      provider: { type: 'string', enum: ['google', 'openai', 'openai-compat', 'seedream', 'dashscope', 'xai', 'zhipu', 'comfyui', 'chatgpt-sub', 'grok-sub', 'google-sub'], description: 'OMIT unless the user explicitly requests a specific image provider. Omission uses the saved default; never guess a channel or fill this with an empty string. Subscription providers edit through their logged-in accounts.' },
+      model: { type: 'string', description: 'OMIT unless the user explicitly requests a specific model; omission uses the configured model. Optional override for this call only. Not used by ComfyUI (use workflow instead) nor by the subscription providers (model fixed by the subscription).' },
+      channel: { type: 'string', description: 'Optional configured OpenAI-compatible channel id for this call only. Only meaningful with provider=openai-compat; omit to use the active channel.' },
       source: { type: 'string', enum: ['canvas_selection'], description: 'Use the current selection on the image-gen workbench infinite canvas as the reference image(s): full-resolution originals when the selection is conversation-generated images, plus a screenshot of the whole selection when it also contains other content (hand-drawn strokes, pasted images). Choose this when the user refers to what they selected or drew on the canvas; combine with no other selector field.' },
       source_attachment_id: { type: 'string', description: 'Optional attachment id of a specific image already present in the current conversation.' },
       source_attachment_ids: { type: 'array', items: { type: 'string' }, description: 'Optional ordered attachment ids of multiple images already present in the current conversation. Prompt references such as image 1 and image 2 follow this order.' },
       source_path: { type: 'string', description: 'Optional absolute or workspace-relative path of a specific image file inside the active session workspace. Prefer this when the user names a saved file.' },
       source_paths: { type: 'array', items: { type: 'string' }, description: 'Optional ordered absolute or workspace-relative paths of multiple image files inside the active session workspace.' },
       aspect_ratio: { type: 'string', enum: ['1:1', '3:2', '2:3', '4:3', '3:4', '4:5', '5:4', '16:9', '9:16', '21:9'], description: 'Optional output aspect ratio for Google Gemini, xAI Grok, and subscription channels.' },
-      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K).' },
+      image_size: { type: 'string', enum: ['1K', '2K', '4K'], description: 'Optional output resolution for Google Gemini, xAI Grok, Grok subscription (1K/2K), or Google subscription (1K/4K). NEVER send this for chatgpt-sub; omit unused fields entirely.' },
       size: { type: 'string', description: 'Optional output size for OpenAI, Seedream, or DashScope; WIDTHxHEIGHT maps to aspect_ratio for xAI Grok.' },
       quality: { type: 'string', description: 'Optional generation quality for OpenAI or compatible edits, independent of size.' },
       workflow: { type: 'string', description: 'Optional name of the ComfyUI workflow to run; omit to use the active workflow from settings. Only meaningful when the ComfyUI provider is selected.' },
     },
     output: imageOutput('Edited'),
-    async execute(args, exec): Promise<GeneratedValue> {
-      const active = resolveProvider(withProviderOverrides(current(), providerOverrideOf(args.provider), args.model))
+    async execute(rawArgs, exec): Promise<GeneratedValue> {
+      const args = cleanImageToolArgs(rawArgs)
+      const requestConfig = configForToolCall(current(), providerOverrideOf(args.provider), args.channel)
+      const active = resolveProvider(withProviderOverrides(requestConfig, providerOverrideOf(args.provider), args.model, 'edit'))
       const canvasSelection = args.source === 'canvas_selection'
       if (canvasSelection && (
         args.source_attachment_id !== undefined
@@ -471,22 +653,23 @@ export function apply(ctx: Context, config: Config = {}): void {
         return saveGenerated(ctx, generated, active.provider, active.model, 'subscription edit', current(), exec, knownWorkspaceRoots)
       }
 
-      const credential = await requireApiKey(ctx, active.provider, 'edit_image')
+      const credential = await requireApiKey(ctx, active.provider, 'edit_image', active.provider === 'openai-compat' ? resolveOpenAICompatChannel(requestConfig, args.channel).keyRef : undefined)
       if (active.provider === 'google') {
         const aspectRatio = (args.aspect_ratio ?? active.aspectRatio) as AspectRatio
         const imageSize = (args.image_size ?? active.imageSize) as ImageSize
-        const generated = await editGoogleImage({ apiKey: credential, endpoint: active.endpoint, model: active.model, prompt: args.prompt, sourceImages, aspectRatio, imageSize, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal })
+        const generated = await editGoogleImage({ apiKey: credential, endpoint: active.endpoint, native: active.native, model: active.model, prompt: args.prompt, sourceImages, aspectRatio, imageSize, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal })
         return saveGenerated(ctx, generated, active.provider, active.model, `${aspectRatio}, ${imageSize}`, current(), exec, knownWorkspaceRoots)
       }
 
       const size = args.size ?? active.imageSize
       if (active.provider === 'openai' || active.provider === 'openai-compat' || active.provider === 'xai' || active.provider === 'zhipu') {
         if (active.provider === 'openai') validateOfficialSize(active.model, size)
-        const quality = active.provider === 'openai-compat' ? compatRequestQuality(current(), args.quality) : active.provider === 'openai' ? args.quality : undefined
+        const quality = active.provider === 'openai-compat' ? compatRequestQuality(requestConfig, args.quality) : active.provider === 'openai' ? args.quality : undefined
         if (active.provider === 'openai' && quality !== undefined && !officialQualityOptions(active.model).some(option => option.value === quality)) throw new Error('该 OpenAI 模型不支持所选生成质量')
         const xaiExtraBody = active.provider === 'xai' ? xaiToolParameters({ ...(args.aspect_ratio !== undefined ? { aspectRatio: args.aspect_ratio } : {}), ...(args.image_size !== undefined ? { imageSize: args.image_size } : {}), ...(args.size !== undefined ? { size: args.size } : {}) }) : undefined
-        const generated = await editOpenAICompatibleImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, sourceImages, ...(active.provider === 'xai' ? {} : { size }), ...(quality === undefined ? {} : { quality }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, ...(active.provider === 'openai-compat' ? { editFormat: active.editFormat, editExtra: active.editExtra, editSizeMode: current().openaiCompatEditSizeMode ?? 'auto' } : active.provider === 'xai' ? { editFormat: 'xaiJson' as const, ...(xaiExtraBody === undefined ? {} : { extraBody: xaiExtraBody }) } : {}) })
-        return saveGenerated(ctx, generated, active.provider, active.model, active.provider === 'xai' ? (xaiExtraBody?.aspect_ratio ?? 'auto') : quality === undefined ? size : `${size}, quality=${quality}`, current(), exec, knownWorkspaceRoots)
+        const generated = await editOpenAICompatibleImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, sourceImages, ...(active.provider === 'xai' ? {} : { size }), ...(quality === undefined ? {} : { quality }), maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, ...(active.provider === 'openai-compat' ? { editFormat: active.editFormat, editExtra: active.editExtra, editSizeMode: requestConfig.openaiCompatEditSizeMode ?? 'auto', editResponseFormat: 'auto' as const, onResponseFormatRetry: status => { ctx.logger.warn('dsh-image-gen: openai-compatible relay rejected response_format=b64_json (' + String(status) + '); retrying without it') } } : active.provider === 'xai' ? { editFormat: 'xaiJson' as const, ...(xaiExtraBody === undefined ? {} : { extraBody: xaiExtraBody }) } : {}) })
+        const value = await saveGenerated(ctx, generated, active.provider, active.model, active.provider === 'xai' ? (xaiExtraBody?.aspect_ratio ?? 'auto') : quality === undefined ? size : `${size}, quality=${quality}`, current(), exec, knownWorkspaceRoots)
+        return active.provider === 'openai-compat' ? { ...value, channel: resolveOpenAICompatChannel(requestConfig, args.channel).id } : value
       }
       if (active.provider === 'seedream') {
         const generated = await editSeedreamImage({ apiKey: credential, baseURL: active.baseURL, model: active.model, prompt: args.prompt, sourceImages, size, maxBytes: ctx.attachments.imageLimits.maxImageBytes, signal: exec.signal, arkOptions: active.arkOptions })
@@ -544,7 +727,7 @@ function imageOutput(verb: 'Generated' | 'Edited') {
         attachment: { type: 'object', required: true, additionalProperties: false, properties: {
           attachmentId: { type: 'string', required: true }, mediaType: { type: 'string', required: true }, bytes: { type: 'integer', required: true }, width: { type: 'integer', required: true }, height: { type: 'integer', required: true }, name: { type: 'string' }, originalDimensions: { type: 'object', additionalProperties: false, properties: { width: { type: 'integer', required: true }, height: { type: 'integer', required: true } } },
         } },
-        provider: { type: 'string', required: true }, model: { type: 'string', required: true }, output: { type: 'string', required: true }, savedTo: { type: 'string' }, saveError: { type: 'string' }, seed: { type: 'integer' },
+        provider: { type: 'string', required: true }, channel: { type: 'string' }, model: { type: 'string', required: true }, output: { type: 'string', required: true }, savedTo: { type: 'string' }, saveError: { type: 'string' }, seed: { type: 'integer' },
       },
     },
     render: (_args: unknown, value: GeneratedValue) => {
@@ -557,6 +740,7 @@ function imageOutput(verb: 'Generated' | 'Edited') {
     },
     presentationMeta: (args: unknown, value: GeneratedValue) => ({
       kind: 'dsh-image-gen', attachment: attachmentMeta(value.attachment), provider: value.provider, model: value.model, output: value.output,
+      ...(value.channel === undefined ? {} : { channel: value.channel }),
       ...(verb === 'Edited' ? { operation: 'edit' } : {}),
       ...(typeof value.savedTo === 'string' ? { savedTo: value.savedTo } : {}),
       ...(typeof value.seed === 'number' ? { seed: value.seed } : {}),

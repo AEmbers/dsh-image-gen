@@ -19,9 +19,10 @@ import {
   migrateOpenAICompatConfig,
   resolveProvider,
   selectComfyUIWorkflow,
+  withOpenAICompatChannel,
   withProviderOverrides,
 } from '../src/config.js'
-import { mergeComfyUIPrompt, resolveComfyUIWorkflows, uniqueComfyUIWorkflowName } from '../src/shared.js'
+import { mergeComfyUIPrompt, resolveComfyUIWorkflows, resolveOpenAICompatChannel, resolveOpenAICompatChannels, resolveOpenAICompatModels, uniqueComfyUIWorkflowName } from '../src/shared.js'
 
 /** DSH 0.1.7 resolves `.volatile()` schema fields to boxes; unwrap for assertions. */
 function unwrap<T extends Record<string, unknown>>(value: T): T {
@@ -35,7 +36,7 @@ function unwrap<T extends Record<string, unknown>>(value: T): T {
 
 describe('resolveProvider', () => {
   it('resolves the Google defaults', () => {
-    expect(resolveProvider({})).toEqual({ provider: 'google', apiKeyEnv: 'GEMINI_API_KEY', endpoint: DEFAULT_GOOGLE_ENDPOINT, model: DEFAULT_GOOGLE_MODEL, aspectRatio: '1:1', imageSize: '1K' })
+    expect(resolveProvider({})).toEqual({ provider: 'google', apiKeyEnv: 'GEMINI_API_KEY', endpoint: DEFAULT_GOOGLE_ENDPOINT, model: DEFAULT_GOOGLE_MODEL, native: false, aspectRatio: '1:1', imageSize: '1K' })
   })
 
   it('resolves editable OpenAI-compatible profiles independently', () => {
@@ -137,11 +138,56 @@ describe('openai-compat provider', () => {
 
   it('routes per-call model overrides to the compat field', () => {
     const config = withProviderOverrides(
-      { provider: 'openai-compat', openaiCompatBaseURL: 'https://relay.example.com/v1', openaiCompatModel: 'flux-pro-1.1' },
+      { provider: 'openai-compat', openaiCompatBaseURL: 'https://relay.example.com/v1', openaiCompatModel: 'flux-pro-1.1', openaiCompatModels: ['flux-pro-1.1', 'qwen-image'] },
       undefined,
       'qwen-image',
     )
     expect(resolveProvider(config)).toMatchObject({ provider: 'openai-compat', model: 'qwen-image' })
+  })
+
+  it('normalizes multiple models and keeps the legacy default selectable', () => {
+    expect(unwrap(Config({})).openaiCompatModels).toEqual([])
+    expect(resolveOpenAICompatModels({ openaiCompatModel: ' image-2 ' })).toEqual(['image-2'])
+    expect(resolveOpenAICompatModels({
+      openaiCompatModel: 'image-2',
+      openaiCompatModels: [' image-2.5 ', 'image-2', 'image-2.5', ''],
+    })).toEqual(['image-2.5', 'image-2'])
+    expect(resolveOpenAICompatModels({
+      openaiCompatModel: 'image-2',
+      openaiCompatModels: ['image-2.5'],
+    })).toEqual(['image-2', 'image-2.5'])
+  })
+
+  it('projects a named channel without changing the legacy default channel', () => {
+    const config: Config = {
+      provider: 'openai-compat',
+      openaiCompatLabel: 'Legacy relay',
+      openaiCompatBaseURL: 'https://legacy.example/v1',
+      openaiCompatModel: 'legacy-model',
+      openaiCompatModels: ['legacy-model'],
+      openaiCompatChannels: [{
+        id: 'relay-b', label: 'Relay B', keyRef: '', baseURL: 'https://relay-b.example/v1', model: 'relay-b-model',
+        models: ['relay-b-model', 'relay-b-pro'], editModel: 'relay-b-edit', quality: 'high', qualityOptions: ['low', 'high'],
+        extraBody: { watermark: false }, editSizeMode: 'selected', editFormat: 'jsonImageUrlArray', editExtra: { prompt_extend: true },
+        sizes: { '16:9': { '2K': '2048x1152' } },
+      }],
+    }
+    expect(resolveOpenAICompatChannels(config)).toMatchObject([
+      { id: 'default', label: 'Legacy relay', keyRef: 'DSH_IMAGE_GEN_OPENAI_COMPAT_KEY', baseURL: 'https://legacy.example/v1', model: 'legacy-model' },
+      { id: 'relay-b', label: 'Relay B', keyRef: 'DSH_IMAGE_GEN_OPENAI_COMPAT_KEY_RELAY_B', baseURL: 'https://relay-b.example/v1', model: 'relay-b-model' },
+    ])
+    const scoped = withOpenAICompatChannel(config, 'relay-b')
+    expect(scoped).toMatchObject({
+      openaiCompatLabel: 'Relay B', openaiCompatBaseURL: 'https://relay-b.example/v1', openaiCompatModel: 'relay-b-model',
+      openaiCompatModels: ['relay-b-model', 'relay-b-pro'], openaiCompatEditModel: 'relay-b-edit', openaiCompatQuality: 'high',
+      openaiCompatQualityOptions: ['low', 'high'], openaiCompatExtraBody: { watermark: false }, openaiCompatEditSizeMode: 'selected',
+      openaiCompatEditFormat: 'jsonImageUrlArray', openaiCompatEditExtra: { prompt_extend: true }, openaiCompatActiveChannel: 'relay-b',
+    })
+    expect(resolveProvider(scoped)).toMatchObject({ baseURL: 'https://relay-b.example/v1', model: 'relay-b-model', editFormat: 'jsonImageUrlArray', editExtra: { prompt_extend: true } })
+    expect(config.openaiCompatBaseURL).toBe('https://legacy.example/v1')
+    expect(config.openaiCompatModel).toBe('legacy-model')
+    expect(resolveOpenAICompatChannel({ ...config, openaiCompatActiveChannel: 'relay-b' }).id).toBe('relay-b')
+    expect(() => resolveOpenAICompatChannel(config, 'missing')).toThrow('Unknown OpenAI-compatible channel')
   })
 })
 
@@ -202,6 +248,7 @@ describe('openai-compat migration', () => {
       openaiBaseURL: DEFAULT_OPENAI_BASE_URL,
       openaiCompatBaseURL: 'https://relay.example.com/v1',
       openaiCompatModel: 'flux-pro-1.1',
+      openaiCompatModels: ['flux-pro-1.1'],
     })
   })
 
@@ -223,6 +270,7 @@ describe('openai-compat migration', () => {
       provider: 'google',
       openaiCompatBaseURL: 'https://relay.example.com/v1',
       openaiCompatModel: 'flux-pro-1.1',
+      openaiCompatModels: ['flux-pro-1.1'],
     })
   })
 })
@@ -334,6 +382,28 @@ describe('selectComfyUIWorkflow', () => {
 })
 
 describe('Config Schema validation', () => {
+  it('defaults the cloud timeout to 150 seconds and exposes a live override', () => {
+    expect(unwrap(Config({})).cloudTimeoutMs).toBe(150_000)
+    const configured = Config({ cloudTimeoutMs: 240_000 })
+    expect(configured.cloudTimeoutMs).toHaveProperty('get')
+    expect(unwrap(configured).cloudTimeoutMs).toBe(240_000)
+  })
+
+  it.each([5_000, 3_600_000])('accepts the cloud timeout boundary %s', cloudTimeoutMs => {
+    expect(unwrap(Config({ cloudTimeoutMs })).cloudTimeoutMs).toBe(cloudTimeoutMs)
+  })
+
+  it.each([4_999, 3_600_001])('rejects an out-of-range cloud timeout %s', cloudTimeoutMs => {
+    expect(() => Config({ cloudTimeoutMs })).toThrow()
+  })
+
+  it('keeps native Google opt-in and exposes it as a live field', () => {
+    expect(unwrap(Config({})).googleNative).toBe(false)
+    const enabled = Config({ googleNative: true })
+    expect(enabled.googleNative).toHaveProperty('get')
+    expect(resolveProvider(unwrap(enabled))).toMatchObject({ provider: 'google', native: true })
+  })
+
   it('exposes the opt-in composer pill as a live settings field', () => {
     expect(unwrap(Config({})).showProviderPill).toBe(false)
     const enabled = Config({ showProviderPill: true })

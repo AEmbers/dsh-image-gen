@@ -31,4 +31,4 @@ export declare function describeStudio(ctx: Context, config: Config, subscriptio
 /** Execute one validated browser workbench request using the existing provider adapters. */
 export declare function generateFromStudio(ctx: Context, config: Config, input: StudioGenerateRequest, signal: AbortSignal, fallbackWorkspaceRoot?: string | undefined, subscriptions?: SubscriptionManager | undefined): Promise<StudioGenerateResponse>;
 export declare function runPool<T>(tasks: Array<() => Promise<T>>, concurrency?: number): Promise<PromiseSettledResult<T>[]>;
-export declare function studioProfile(config: Config, provider: CloudImageProvider, configured: boolean): StudioProviderProfile;
+export declare function studioProfile(config: Config, provider: CloudImageProvider, configured: boolean, channelId?: string): StudioProviderProfile;

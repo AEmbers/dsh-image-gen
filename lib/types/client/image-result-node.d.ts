@@ -5,6 +5,7 @@ export interface ImageResultPresentation {
     readonly attachment: ImageAttachmentRef;
     readonly prompt: string;
     readonly provider: string;
+    readonly channel?: string;
     readonly model: string;
     readonly output: string;
     readonly savedTo?: string;

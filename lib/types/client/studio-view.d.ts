@@ -40,9 +40,3 @@ export declare const StudioView: FC<{
     onInitialReferenceApplied?(): void;
     onOpenInspiration?(): void;
 }>;
-export declare function useAttachmentImage(attachment: ImageAttachmentRef | undefined, shouldLoad?: boolean): {
-    url: string | null;
-    blob: Blob | null;
-    loading: boolean;
-};
-export declare function fileToBase64(file: File): Promise<string>;

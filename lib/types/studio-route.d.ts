@@ -5,6 +5,7 @@ export interface StudioRouteDeps {
     describe(): Promise<StudioConfigResponse>;
     generate(input: StudioGenerateRequest, signal: AbortSignal): Promise<StudioGenerateResponse>;
     maxBodyBytes: number;
+    timeoutMs?: number;
     /** Heartbeat cadence for the streaming generation response; tests shrink it. */
     heartbeatMs?: number;
 }

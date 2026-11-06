@@ -1,8 +1,8 @@
 /** User-facing configuration for supported image providers. */
 import z from '@deepseek-ai/schemastery';
 import type { CompatEditFormat } from './openai-compatible.js';
-import { ARK_BACKGROUND_MODES, ARK_OUTPUT_FORMATS, DEFAULT_DASHSCOPE_ENDPOINT, DEFAULT_DASHSCOPE_MODEL, DEFAULT_COMFYUI_BASE_URL, DEFAULT_COMFYUI_TIMEOUT_MS, DEFAULT_COMFYUI_WORKFLOW_LABEL, DEFAULT_GOOGLE_ENDPOINT, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_SEEDREAM_BASE_URL, DEFAULT_SEEDREAM_MODEL, DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL, DEFAULT_ZHIPU_BASE_URL, DEFAULT_ZHIPU_MODEL, DASHSCOPE_API_KEY_ENV, GOOGLE_API_KEY_ENV, IMAGE_PROVIDERS, OPENAI_API_KEY_ENV, OPENAI_COMPAT_API_KEY_ENV, SEEDREAM_API_KEY_ENV, XAI_API_KEY_ENV, ZHIPU_API_KEY_ENV, activeComfyUIWorkflow, resolveComfyUIWorkflows, type ArkBackgroundMode, type ArkOutputFormat, type ArkOutputOptions, type ComfyUIWorkflowEntry, type ImageProvider } from './shared.js';
-export { ARK_BACKGROUND_MODES, ARK_OUTPUT_FORMATS, DEFAULT_DASHSCOPE_ENDPOINT, DEFAULT_DASHSCOPE_MODEL, DEFAULT_COMFYUI_BASE_URL, DEFAULT_COMFYUI_TIMEOUT_MS, DEFAULT_COMFYUI_WORKFLOW_LABEL, DEFAULT_GOOGLE_ENDPOINT, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_SEEDREAM_BASE_URL, DEFAULT_SEEDREAM_MODEL, DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL, DEFAULT_ZHIPU_BASE_URL, DEFAULT_ZHIPU_MODEL, DASHSCOPE_API_KEY_ENV, GOOGLE_API_KEY_ENV, IMAGE_PROVIDERS, OPENAI_API_KEY_ENV, OPENAI_COMPAT_API_KEY_ENV, SEEDREAM_API_KEY_ENV, XAI_API_KEY_ENV, ZHIPU_API_KEY_ENV, activeComfyUIWorkflow, resolveComfyUIWorkflows, type ArkBackgroundMode, type ArkOutputFormat, type ArkOutputOptions, type ComfyUIWorkflowEntry, type ImageProvider, };
+import { ARK_BACKGROUND_MODES, ARK_OUTPUT_FORMATS, DEFAULT_CLOUD_TIMEOUT_MS, DEFAULT_DASHSCOPE_ENDPOINT, DEFAULT_DASHSCOPE_MODEL, DEFAULT_COMFYUI_BASE_URL, DEFAULT_COMFYUI_TIMEOUT_MS, DEFAULT_COMFYUI_WORKFLOW_LABEL, DEFAULT_GOOGLE_ENDPOINT, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_SEEDREAM_BASE_URL, DEFAULT_SEEDREAM_MODEL, DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL, DEFAULT_ZHIPU_BASE_URL, DEFAULT_ZHIPU_MODEL, DASHSCOPE_API_KEY_ENV, GOOGLE_API_KEY_ENV, IMAGE_PROVIDERS, OPENAI_API_KEY_ENV, OPENAI_COMPAT_API_KEY_ENV, SEEDREAM_API_KEY_ENV, XAI_API_KEY_ENV, ZHIPU_API_KEY_ENV, activeComfyUIWorkflow, resolveComfyUIWorkflows, type OpenAICompatChannel, type ArkBackgroundMode, type ArkOutputFormat, type ArkOutputOptions, type ComfyUIWorkflowEntry, type ImageProvider } from './shared.js';
+export { ARK_BACKGROUND_MODES, ARK_OUTPUT_FORMATS, DEFAULT_CLOUD_TIMEOUT_MS, DEFAULT_DASHSCOPE_ENDPOINT, DEFAULT_DASHSCOPE_MODEL, DEFAULT_COMFYUI_BASE_URL, DEFAULT_COMFYUI_TIMEOUT_MS, DEFAULT_COMFYUI_WORKFLOW_LABEL, DEFAULT_GOOGLE_ENDPOINT, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_SEEDREAM_BASE_URL, DEFAULT_SEEDREAM_MODEL, DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL, DEFAULT_ZHIPU_BASE_URL, DEFAULT_ZHIPU_MODEL, DASHSCOPE_API_KEY_ENV, GOOGLE_API_KEY_ENV, IMAGE_PROVIDERS, OPENAI_API_KEY_ENV, OPENAI_COMPAT_API_KEY_ENV, SEEDREAM_API_KEY_ENV, XAI_API_KEY_ENV, ZHIPU_API_KEY_ENV, activeComfyUIWorkflow, resolveComfyUIWorkflows, type ArkBackgroundMode, type ArkOutputFormat, type ArkOutputOptions, type ComfyUIWorkflowEntry, type ImageProvider, };
 /** Default workspace subfolder that receives generated image files. */
 export declare const DEFAULT_WORKSPACE_FOLDER = "dsh-image-gen";
 /** Google tool-level controls. Aligned with gemini-3.1-flash-image's common set. */
@@ -13,15 +13,26 @@ export type ImageSize = typeof IMAGE_SIZES[number];
 /** Bundle configuration from the profile patch and the Web settings page. */
 export interface Config {
     provider?: ImageProvider;
+    cloudTimeoutMs?: number;
     googleModel?: string;
     googleEndpoint?: string;
+    /** Use Gemini generateContent instead of Interactions; opt-in for native-only gateways. */
+    googleNative?: boolean;
     openaiBaseURL?: string;
     openaiModel?: string;
     /** Official model size table: ratio -> resolution tier -> pixels. Empty uses model presets. */
     openaiSizes?: Record<string, Record<string, string>>;
     /** OpenAI-compatible relay settings; independent from the official OpenAI row. */
+    openaiCompatLabel?: string;
     openaiCompatBaseURL?: string;
     openaiCompatModel?: string;
+    /** Models offered by the workbench for the legacy default channel. */
+    openaiCompatModels?: string[];
+    /** Additional named relay channels; the flat fields above remain the default channel. */
+    openaiCompatChannels?: OpenAICompatChannel[];
+    openaiCompatActiveChannel?: string;
+    /** Editing model; empty reuses the generation model. */
+    openaiCompatEditModel?: string;
     /** Default quality; empty preserves the upstream default by omitting the field. */
     openaiCompatQuality?: string;
     /** Quality values accepted by this relay; independent of resolution tiers. */
@@ -38,7 +49,7 @@ export interface Config {
       * `reference_images` field is a JSON array of base64 strings. Defaults to
       * `multipart`.
       */
-    openaiCompatEditFormat?: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages';
+    openaiCompatEditFormat?: 'multipart' | 'jsonImageUrlArray' | 'formReferenceImages' | 'siliconflowJson';
     /**
      * Extra JSON fields merged into the JSON edit body last (can override the
      * built-in defaults), e.g. SenseNova's `watermark`/`prompt_extend`.
@@ -101,6 +112,18 @@ export interface Config {
      * empty keeps them direct. Everything else in the host stays untouched.
      */
     subscriptionProxyUrl?: string;
+    /** Prune the host request-image cache once at startup and then daily. */
+    requestCachePrune?: boolean;
+    /** Retain request-image variants for this many days. */
+    requestCacheTtlDays?: number;
+    /** Byte budget for the request-image cache; 0 disables the cap. */
+    requestCacheMaxBytes?: number;
+    /** Override the request-image cache root (empty keeps the DSH_HOME default). */
+    requestCacheDir?: string;
+    /** Keep the pre-normalization bytes when the attachment layer changes an import. */
+    vaultEnabled?: boolean;
+    /** Override the raw-image vault root (empty keeps the DSH_HOME default). */
+    vaultDir?: string;
 }
 /**
  * Cordis configuration schema. Volatile marking happens per field (see
@@ -114,6 +137,7 @@ export declare function resolveProvider(config: Config): {
     apiKeyEnv: string;
     model: string;
     endpoint: string;
+    native: boolean;
     aspectRatio: AspectRatio;
     imageSize: ImageSize;
 } | {
@@ -171,11 +195,13 @@ export declare function resolveProvider(config: Config): {
     provider: 'google-sub';
     model: string;
 };
+/** Project one named relay channel onto the legacy flat fields used by all provider adapters. */
+export declare function withOpenAICompatChannel(config: Config, channelId?: string): Config;
 /**
  * Apply a per-call provider and/or model override on top of the saved config.
  * `model` is ignored for ComfyUI, whose per-call equivalent is `workflow`.
  */
-export declare function withProviderOverrides(config: Config, provider?: ImageProvider, model?: string): Config;
+export declare function withProviderOverrides(config: Config, provider?: ImageProvider, model?: string, mode?: 'generate' | 'edit'): Config;
 /**
  * One-time migration: when the legacy single OpenAI slot points at a relay
  * (non-official base URL) and the compat row is empty, move the relay config

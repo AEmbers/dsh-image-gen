@@ -21,3 +21,9 @@ export interface ZipFileInput {
  * Zero external dependencies, pure browser ArrayBuffer/Blob, fast and universally compatible with OS extractors.
  */
 export declare function createZipBlob(files: ZipFileInput[]): Blob;
+/**
+ * Downscale an image for the gallery grid.
+ * Returns the source blob when the browser lacks the needed canvas APIs, so
+ * callers can always render something without extra capability branches.
+ */
+export declare function createImageThumbnail(source: Blob, width: number): Promise<Blob>;

@@ -3,14 +3,16 @@
  * Stores lightweight metadata indexes; image binaries remain managed by DSH Attachment service.
  * Supports tombstones to ensure deleted items are never resurrected when revisiting conversations.
  */
-import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment';
+import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment';
 import type { ImageProvider, StudioWatermark } from '../shared.js';
+export { GALLERY_THUMB_MAX_AGE_MS, GALLERY_THUMB_MAX_BYTES, GALLERY_THUMB_WIDTH, galleryThumbKey, getGalleryThumb, getGalleryThumbStats, pruneGalleryThumbs, putGalleryThumb, } from './gallery-thumbs.js';
 export interface GalleryItem {
     id: string;
     attachment: ImageAttachmentRef;
     prompt: string;
     /** Generation provider, or 'import' for user-uploaded images. */
     provider: ImageProvider | 'import';
+    channel?: string | undefined;
     model: string;
     createdAt: number;
     aspectRatio?: string | undefined;
@@ -35,6 +37,12 @@ export interface GalleryItem {
     sessionId?: string | undefined;
     /** Attachment ids of the source images this image was edited from; used by the canvas to rebuild edit chains. Optional so records written by older versions stay readable. */
     sourceAttachmentIds?: string[] | undefined;
+    /** Raw pre-normalization bytes, present only when the attachment layer changed the import. */
+    original?: {
+        key: string;
+        bytes: number;
+        mediaType: ImageMediaType;
+    } | undefined;
 }
 /** A user-created folder grouping favorite prompts. */
 export interface FavoriteFolder {
@@ -52,6 +60,13 @@ export interface FavoritePrompt {
     /** Owning folder id; absent entries are unfiled and appear under "all". */
     folderId?: string;
 }
+/** Age at which timestamp metadata can be compacted; deleted IDs never expire. */
+export declare const TOMBSTONE_TTL_MS: number;
+/**
+ * Compact old tombstones to permanent IDs. Removing an ID would let an old
+ * conversation silently reinsert a deleted image. No IDs are removed.
+ */
+export declare function pruneTombstones(maxAgeMs?: number): Promise<number>;
 type GalleryListener = () => void;
 /**
  * Subscribe to gallery mutations (insert/delete/clear).
@@ -71,6 +86,12 @@ export declare function saveGalleryItem(item: Omit<GalleryItem, 'createdAt'> & {
  * Retrieve all gallery records sorted by createdAt descending.
  */
 export declare function getGalleryItems(): Promise<GalleryItem[]>;
+/**
+ * Like getGalleryItems, but rejects when IndexedDB is unavailable. Maintenance
+ * callers must not treat a read failure as an empty gallery (that would make
+ * vault gc delete every original).
+ */
+export declare function getGalleryItemsStrict(): Promise<GalleryItem[]>;
 /**
  * Toggle favorite status of a gallery item.
  * Returns the new favorite status (true if favorited, false if unfavorited).
@@ -127,4 +148,3 @@ export declare function deleteFavoriteFolder(id: string): Promise<void>;
 export declare function moveFavoritePrompt(id: string, folderId: string | undefined): Promise<boolean>;
 /** Rewrite a favorite prompt's text in place, keeping its id stable. */
 export declare function updateFavoritePrompt(id: string, text: string): Promise<boolean>;
-export {};
