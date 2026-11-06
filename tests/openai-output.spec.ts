@@ -17,9 +17,6 @@ describe('independent OpenAI output parameters', () => {
     expect(Object.keys(officialSizeTable({}, 'gpt-image-1.5'))).toEqual(['1:1', '3:2', '2:3'])
     expect(officialQualityOptions('gpt-image-2').map(option => option.value)).not.toContain('max')
     expect(officialQualityOptions('gpt-image-2.5-flare').map(option => option.value)).toContain('max')
-    expect(officialQualityOptions('gpt-image-2.6-sunburst').map(option => option.value)).toEqual(['auto', 'low', 'medium', 'high', 'xhigh', 'max'])
-    expect(officialQualityOptions('gpt-image-2.6-flare').map(option => option.value)).toEqual(['auto', 'low', 'medium', 'high', 'xhigh', 'max'])
-    expect(Object.keys(officialSizeTable({}, 'gpt-image-2.6-sunburst'))).toContain('16:9')
   })
   it('distinguishes explicit omission, a configured default and a per-call override', () => {
     expect(compatRequestQuality({})).toBeUndefined()

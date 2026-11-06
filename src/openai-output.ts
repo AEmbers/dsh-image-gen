@@ -44,7 +44,7 @@ export function validateOfficialSize(model: string, size: string): void {
 }
 
 export function officialQualityOptions(model: string): StudioOption[] {
-  const values = ['auto', 'low', 'medium', 'high', ...(/^gpt-image-2\.[56]-(sunburst|flare)(?:$|-)/.test(model) ? ['xhigh', 'max'] : [])]
+  const values = ['auto', 'low', 'medium', 'high', ...(/^gpt-image-2\.5-(sunburst|flare)(?:$|-)/.test(model) ? ['xhigh', 'max'] : [])]
   return values.map(value => ({ value, label: value === 'auto' ? '自动' : value }))
 }
 
